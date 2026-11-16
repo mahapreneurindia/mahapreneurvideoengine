@@ -39,3 +39,24 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           JOB_ID: ${{ github.event.client_payload.job_id }}
         run: python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 $JOB_ID
+
+      - name: Send Webhook to Next.js
+        if: always()
+        env:
+          NEXTJS_APP_URL: ${{ secrets.NEXTJS_APP_URL }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
+          JOB_ID: ${{ github.event.client_payload.job_id }}
+          SUPABASE_URL: "https://your-supabase-url.supabase.co/storage/v1/object/public/media/${{ github.event.client_payload.job_id }}.mp4"
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          # Map GitHub status to our DB status
+          if [ "$JOB_STATUS" == "success" ]; then
+            FINAL_STATUS="completed"
+          else
+            FINAL_STATUS="failed"
+          fi
+
+          curl -X POST "$NEXTJS_APP_URL/api/video/webhook" \
+            -H "Content-Type: application/json" \
+            -H "Authorization: Bearer $WEBHOOK_SECRET" \
+            -d "{\"job_id\": \"$JOB_ID\", \"status\": \"$FINAL_STATUS\", \"supabase_url\": \"$SUPABASE_URL\"}"
