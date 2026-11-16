@@ -1,0 +1,41 @@
+name: Render Cinematic Video
+on:
+  repository_dispatch:
+    types: [generate_video]
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+
+      - name: Install Python Requirements
+        run: pip install -r requirements.txt
+
+      - name: Process Sarvam AI & Render Video
+        env:
+          SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+        run: |
+          # Placeholder for TTS and Skia rendering execution
+          echo "Rendering chapter based on payload..."
+          # Mock output for testing the pipeline
+          mkdir -p /tmp/video-job
+          touch /tmp/video-job/final.mp4
+
+      - name: Upload to Supabase Storage
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          JOB_ID: ${{ github.event.client_payload.job_id }}
+        run: python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 $JOB_ID
