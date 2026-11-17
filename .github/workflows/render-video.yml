@@ -27,11 +27,16 @@ jobs:
         env:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
         run: |
-          # Placeholder for TTS and Skia rendering execution
-          echo "Rendering chapter based on payload..."
-          # Mock output for testing the pipeline
+          echo "Executing TTS and Skia rendering pipeline..."
           mkdir -p /tmp/video-job
-          touch /tmp/video-job/final.mp4
+
+          # Save the incoming Next.js payload (script, theme, job_id) to a JSON file
+          cat << 'EOF' > /tmp/video-job/payload.json
+          ${{ toJSON(github.event.client_payload) }}
+          EOF
+
+          # Execute the Python rendering script
+          python3 scripts/render.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
 
       - name: Upload to Supabase Storage
         env:
