@@ -269,6 +269,9 @@ def main() -> None:
     with open(args.payload, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
+    print("=== INCOMING NEXT.JS PAYLOAD ===")
+    print(json.dumps(payload, indent=2, ensure_ascii=False))
+
     data = payload.get("client_payload", payload)
     chapters = data.get("chapters", [])
     if not chapters:

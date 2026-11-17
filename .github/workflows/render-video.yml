@@ -38,8 +38,8 @@ jobs:
           ${{ toJSON(github.event.client_payload) }}
           EOF
 
-          # Execute the headless cinematic-skill orchestrator
-          python3 scripts/orchestrate_cinematic.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
+          # Execute the custom autonomous rendering script
+          python3 scripts/render.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
 
       - name: Upload to Supabase Storage
         env:
