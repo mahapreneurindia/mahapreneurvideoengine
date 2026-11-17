@@ -61,7 +61,9 @@ def main():
     list_file = os.path.join(audio_dir, "concat.txt")
     with open(list_file, "w", encoding="utf-8") as lf:
         for tf in temp_files:
-            lf.write(f"file '{os.path.basename(tf)}'\n")
+            # FFmpeg concat demuxer requires absolute paths to be safe, especially in tmp dirs
+            abs_path = os.path.abspath(tf)
+            lf.write(f"file '{abs_path}'\n")
 
     subprocess.run(
         ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", "-y", final_audio],
