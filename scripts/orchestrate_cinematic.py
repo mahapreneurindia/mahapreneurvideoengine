@@ -16,8 +16,13 @@ def main():
     args = parser.parse_args()
 
     with open(args.payload, "r", encoding="utf-8") as f:
-        raw = json.load(f)
-    data = raw.get("client_payload", raw)
+        payload_json = json.load(f)
+        data = payload_json.get("client_payload", payload_json)
+
+    chapters = data.get("chapters", [])
+    if not chapters:
+        print("WARNING: No chapters found in payload! Creating a fallback chapter.")
+        chapters = [{"marathi_narration": "डिफॉल्ट ऑडिओ. माहिती उपलब्ध नाही."}]
 
     project_dir = "/tmp/video-job/project"
     os.makedirs(project_dir, exist_ok=True)
@@ -25,14 +30,15 @@ def main():
     # 1. Story & Scene: Write the generated script and scene instructions to the project folder
     script_path = os.path.join(project_dir, "script.txt")
     with open(script_path, "w", encoding="utf-8") as f:
-        for chapter in data.get("chapters", []):
-            f.write(f"{chapter.get('marathi_narration')}\n")
+        for chapter in chapters:
+            narration = chapter.get("marathi_narration", "डिफॉल्ट ऑडिओ")
+            f.write(f"{narration}\n")
 
     # 2. Images: Automatically fetch Wikimedia Commons assets based on payload keywords
     keywords = " ".join(
         [
             c.get("wiki_image_search", "")
-            for c in data.get("chapters", [])
+            for c in chapters
             if c.get("wiki_image_search")
         ]
     )
