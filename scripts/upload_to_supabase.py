@@ -1,39 +1,48 @@
 import os
 import sys
-from supabase import create_client, Client
+import requests
 
 
-def upload_to_supabase(file_path: str, job_id: str) -> str:
-    """Upload a local file to the Supabase 'media' bucket under the given job_id."""
-    url = os.environ.get("SUPABASE_URL")
-    key = os.environ.get("SUPABASE_SERVICE_KEY")
-    if not url or not key:
-        raise EnvironmentError("SUPABASE_URL and SUPABASE_SERVICE_KEY must be set.")
+def main():
+    if len(sys.argv) < 3:
+        print("Usage: python3 upload_to_supabase.py <file_path> <job_id>")
+        sys.exit(1)
 
-    if not os.path.isfile(file_path):
-        raise FileNotFoundError(f"File not found: {file_path}")
+    file_path = sys.argv[1]
+    job_id = sys.argv[2]
 
-    supabase: Client = create_client(url, key)
+    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+
+    if not supabase_url or not supabase_key:
+        print("Error: SUPABASE_URL or SUPABASE_SERVICE_KEY environment variables missing.")
+        sys.exit(1)
+
+    if not os.path.exists(file_path):
+        print(f"Error: File not found at {file_path}")
+        sys.exit(1)
+
     file_name = os.path.basename(file_path)
-    storage_path = f"{job_id}/{file_name}"
+    # Construct the Supabase Storage endpoint for the 'media' bucket
+    endpoint = f"{supabase_url}/storage/v1/object/media/{job_id}/{file_name}"
 
+    headers = {
+        "Authorization": f"Bearer {supabase_key}",
+        "Content-Type": "video/mp4",
+    }
+
+    print(f"Uploading {file_path} to {endpoint}...")
     with open(file_path, "rb") as f:
-        supabase.storage.from_("media").upload(
-            path=storage_path,
-            file=f,
-            file_options={"upsert": "true"},
-        )
+        response = requests.post(endpoint, headers=headers, data=f)
 
-    public_url = supabase.storage.from_("media").get_public_url(storage_path)
-    return public_url
+    if response.status_code in (200, 201):
+        print("Upload successful!")
+        print(f"{supabase_url}/storage/v1/object/public/media/{job_id}/{file_name}")
+    else:
+        print(f"Upload failed! Status code: {response.status_code}")
+        print(f"Response: {response.text}")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
-    if len(sys.argv) < 3:
-        print("Usage: python upload_to_supabase.py <file_path> <job_id>", file=sys.stderr)
-        sys.exit(1)
-
-    file_path_arg = sys.argv[1]
-    job_id_arg = sys.argv[2]
-    url = upload_to_supabase(file_path_arg, job_id_arg)
-    print(url)
+    main()
