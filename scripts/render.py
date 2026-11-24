@@ -20,6 +20,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from make_map import draw_map_card
 from prep_assets import prepare_chapter_card
 from tts_sarvam import sanitize_tts_text, synthesize_marathi_tts
 
@@ -773,10 +774,12 @@ def draw_chapter_card(
     theme: dict,
     is_active: bool,
     local_progress: float,
+    elapsed_sec: float,
     title_font: skia.Font,
     badge_font: skia.Font,
     hb_font,
     upem: int,
+    font_path: str,
 ) -> None:
     """Draw a single chapter card on the 2D world canvas."""
     w, h = card["w"], card["h"]
@@ -802,19 +805,24 @@ def draw_chapter_card(
     fill_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["card_bg"]), AntiAlias=True)
     canvas.drawRect(card_rect, fill_paint)
 
-    # Fit framed photo card cleanly in upper/middle zone above title + caption bar
+    loc_text = format_map_location(card.get("map_location"))
+    has_map = bool(loc_text)
+
+    # Fit framed photo card cleanly in upper/middle zone (split layout if map_location is present)
     skia_img = card.get("skia_img")
     if skia_img is not None:
         img_w, img_h = skia_img.width(), skia_img.height()
-        target_w = w * 0.86
-        target_h = h * 0.58
+        target_w = (w * 0.56) if has_map else (w * 0.86)
+        target_h = (h * 0.55) if has_map else (h * 0.58)
         base_scale = min(target_w / img_w, target_h / img_h)
         zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
         scale = base_scale * zoom
         drawn_w = img_w * scale
         drawn_h = img_h * scale
+        img_x = (-half_w + 48.0 + (target_w - drawn_w) / 2.0) if has_map else (-drawn_w / 2.0)
+        img_y = (-half_h + 98.0 + (target_h - drawn_h) / 2.0) if has_map else (-half_h + 88.0 + (target_h - drawn_h) / 2.0)
         canvas.save()
-        canvas.translate(-drawn_w / 2.0, -half_h + 88.0 + (target_h - drawn_h) / 2.0)
+        canvas.translate(img_x, img_y)
         canvas.scale(scale, scale)
         canvas.drawImage(
             skia_img,
@@ -823,6 +831,15 @@ def draw_chapter_card(
             skia.SamplingOptions(skia.FilterMode.kLinear),
         )
         canvas.restore()
+
+    if has_map and loc_text:
+        map_w = w * 0.33
+        map_h = h * 0.53
+        map_x = half_w - 48.0 - map_w
+        map_y = -half_h + 104.0
+        map_rect = skia.Rect.MakeXYWH(map_x, map_y, map_w, map_h)
+        map_progress = min(1.0, max(0.0, elapsed_sec / 1.5)) if is_active else 1.0
+        draw_map_card(canvas, map_rect, loc_text, map_progress, font_path)
 
     # Bottom gradient scrim
     scrim_paint = skia.Paint(
@@ -1000,6 +1017,7 @@ def render_world_canvas(
     badge_font: skia.Font,
     hb_font,
     upem: int,
+    font_path: str,
     output_path: str,
 ) -> None:
     """Render all chapters on one continuous 2D world canvas piped to FFmpeg."""
@@ -1065,17 +1083,21 @@ def render_world_canvas(
             draw_world_background(canvas, cam_x, cam_y, cam_zoom, theme, cards)
 
             for idx, card in enumerate(cards):
+                is_curr = idx == active_idx
+                elapsed_sec = max(0.0, t_sec - card["start_sec"]) if is_curr else 1.5
                 draw_chapter_card(
                     canvas=canvas,
                     card=card,
                     total_cards=len(cards),
                     theme=theme,
-                    is_active=(idx == active_idx),
-                    local_progress=local_progress if idx == active_idx else 0.0,
+                    is_active=is_curr,
+                    local_progress=local_progress if is_curr else 0.0,
+                    elapsed_sec=elapsed_sec,
                     title_font=title_font,
                     badge_font=badge_font,
                     hb_font=hb_font,
                     upem=upem,
+                    font_path=font_path,
                 )
 
             canvas.restore()
@@ -1214,6 +1236,7 @@ def main() -> None:
         badge_font=badge_font,
         hb_font=hb_font,
         upem=upem,
+        font_path=font_path,
         output_path=args.output,
     )
     print(f"Final continuous 2D explainer video saved to {args.output}")
