@@ -422,37 +422,151 @@ def split_script_into_chapters(
     return chapters
 
 
+def parse_json_maybe(value):
+    """Parse a JSON string (including markdown ```json ... ``` fences) if possible."""
+    if isinstance(value, (dict, list)):
+        return value
+    if not isinstance(value, str):
+        return None
+
+    text = value.strip()
+    if not text:
+        return None
+
+    fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fence_match:
+        text = fence_match.group(1).strip()
+
+    if not (text.startswith("{") or text.startswith("[")):
+        brace_idx = text.find("{")
+        if brace_idx != -1 and '"chapters"' in text[brace_idx:]:
+            text = text[brace_idx:]
+        else:
+            return None
+
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return None
+
+
+def normalize_chapter(
+    ch: dict,
+    index: int,
+    fallback_scene: str = "",
+    fallback_wiki: str = "",
+    fallback_map: str | None = None,
+) -> dict:
+    """Normalize chapter field variants into a canonical chapter dict."""
+    scene = str(
+        ch.get("scene")
+        or ch.get("title")
+        or fallback_scene
+        or f"प्रकरण {index + 1}"
+    )
+    narration = str(
+        ch.get("marathi_narration")
+        or ch.get("narration")
+        or ch.get("script")
+        or ""
+    )
+    wiki = str(
+        ch.get("wiki_image_search")
+        or ch.get("image_search")
+        or ch.get("keyword")
+        or fallback_wiki
+        or ""
+    )
+    map_loc = ch.get("map_location") or ch.get("location") or fallback_map
+    return {
+        "scene": scene,
+        "marathi_narration": narration,
+        "wiki_image_search": wiki,
+        "map_location": map_loc,
+    }
+
+
+def expand_nested_chapters(raw_chapters: list[dict]) -> list[dict]:
+    """Expand any chapter whose narration contains a fenced/nested JSON chapters block."""
+    expanded: list[dict] = []
+    for ch in raw_chapters:
+        if not isinstance(ch, dict):
+            continue
+        outer_scene = str(ch.get("scene") or ch.get("title") or "")
+        outer_wiki = str(
+            ch.get("wiki_image_search")
+            or ch.get("image_search")
+            or ch.get("keyword")
+            or ""
+        )
+        outer_map = ch.get("map_location") or ch.get("location")
+        raw_narration = (
+            ch.get("marathi_narration")
+            or ch.get("narration")
+            or ch.get("script")
+        )
+
+        parsed = parse_json_maybe(raw_narration)
+        if isinstance(parsed, dict) and isinstance(parsed.get("chapters"), list) and parsed["chapters"]:
+            print(
+                f"Unwrapped {len(parsed['chapters'])} nested chapter(s) from narration JSON."
+            )
+            for inner in parsed["chapters"]:
+                if isinstance(inner, dict):
+                    expanded.append(
+                        normalize_chapter(
+                            inner,
+                            len(expanded),
+                            fallback_scene=outer_scene,
+                            fallback_wiki=outer_wiki,
+                            fallback_map=outer_map,
+                        )
+                    )
+            continue
+
+        expanded.append(normalize_chapter(ch, len(expanded)))
+    return expanded
+
+
 def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
-    """Normalize nested/flat payloads and extract chapter dictionaries."""
-    client_payload = payload.get("client_payload")
-    if isinstance(client_payload, str):
-        try:
-            client_payload = json.loads(client_payload)
-        except json.JSONDecodeError:
-            client_payload = None
-
+    """Normalize nested/flat payloads (including script_data) and extract chapters."""
+    client_payload = parse_json_maybe(payload.get("client_payload"))
     data = client_payload if isinstance(client_payload, dict) else payload
-    video_title = str(data.get("title") or payload.get("title") or "प्रकरण १")
 
-    raw_chapters = data.get("chapters") or payload.get("chapters")
-    if isinstance(raw_chapters, str):
-        try:
-            raw_chapters = json.loads(raw_chapters)
-        except json.JSONDecodeError:
-            raw_chapters = None
+    raw_script_data = data.get("script_data") or payload.get("script_data")
+    script_data = parse_json_maybe(raw_script_data)
+    if not isinstance(script_data, dict):
+        script_data = {}
 
-    if isinstance(raw_chapters, list) and raw_chapters:
-        valid = [ch for ch in raw_chapters if isinstance(ch, dict)]
-        if valid:
-            return data, valid, video_title
+    video_title = str(
+        script_data.get("title")
+        or data.get("title")
+        or payload.get("title")
+        or "प्रकरण १"
+    )
+
+    raw_chapters = (
+        script_data.get("chapters")
+        or data.get("chapters")
+        or payload.get("chapters")
+    )
+    parsed_chapters = parse_json_maybe(raw_chapters)
+    if isinstance(parsed_chapters, list) and parsed_chapters:
+        expanded = expand_nested_chapters(parsed_chapters)
+        if expanded:
+            return data, expanded, video_title
 
     print(
         f"WARNING: 'chapters' list missing or empty. "
-        f"Top-level keys={list(payload.keys())}, data keys={list(data.keys())}"
+        f"Top-level keys={list(payload.keys())}, data keys={list(data.keys())}, "
+        f"script_data keys={list(script_data.keys())}"
     )
 
     fallback_script = (
-        data.get("script")
+        script_data.get("script")
+        or script_data.get("marathi_narration")
+        or script_data.get("narration")
+        or data.get("script")
         or data.get("marathi_narration")
         or data.get("narration")
         or payload.get("script")
@@ -460,13 +574,25 @@ def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
         or payload.get("narration")
         or ""
     )
+    parsed_fallback = parse_json_maybe(fallback_script)
+    if isinstance(parsed_fallback, dict) and isinstance(parsed_fallback.get("chapters"), list):
+        expanded = expand_nested_chapters(parsed_fallback["chapters"])
+        if expanded:
+            print(f"Unwrapped {len(expanded)} chapter(s) from fallback script JSON.")
+            return data, expanded, video_title
+
     wiki_search = str(
-        data.get("wiki_image_search")
+        script_data.get("wiki_image_search")
+        or data.get("wiki_image_search")
         or data.get("image_search")
         or data.get("keyword")
         or ""
     )
-    map_location = data.get("map_location") or data.get("location")
+    map_location = (
+        script_data.get("map_location")
+        or data.get("map_location")
+        or data.get("location")
+    )
 
     if isinstance(fallback_script, str) and fallback_script.strip():
         split_chapters = split_script_into_chapters(
