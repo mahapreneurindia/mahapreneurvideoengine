@@ -379,6 +379,51 @@ def parse_json_maybe(value):
         return None
 
 
+def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
+    """Build a valid vector_graphic spec dict from an explicit graphic_type string."""
+    gtype = graphic_type.strip().lower()
+    if gtype not in ("checklist", "comparison", "stat_counter", "process_steps"):
+        return None
+
+    scene = str(ch.get("scene") or ch.get("title") or "").strip()
+    narration = str(
+        ch.get("marathi_narration") or ch.get("narration") or ch.get("script") or ""
+    ).strip()
+
+    if gtype == "checklist":
+        items = ch.get("items")
+        if not isinstance(items, list) or not items:
+            parts = [
+                p.strip()
+                for p in re.split(r"[।\n]+", narration)
+                if p.strip()
+            ][:3]
+            items = parts or ["नैसर्गिक व शुद्ध", "प्रतिजैविकमुक्त", "उत्तम गुणवत्ता"]
+        return {"type": "checklist", "title": scene or "मुख्य मुद्दे", "items": items}
+
+    if gtype == "comparison":
+        return {
+            "type": "comparison",
+            "left_title": str(ch.get("left_title") or "पारंपरिक"),
+            "left_items": ch.get("left_items") or ["रासायनिक घटक", "कमी टिकवण क्षमता"],
+            "right_title": str(ch.get("right_title") or scene or "शुद्ध पर्याय"),
+            "right_items": ch.get("right_items") or ["१००% नैसर्गिक", "सुरक्षित व आरोग्यदायी"],
+        }
+
+    if gtype == "stat_counter":
+        return {
+            "type": "stat_counter",
+            "target_value": ch.get("target_value") or 100,
+            "suffix": str(ch.get("suffix") or "%"),
+            "subtitle": scene or "शुद्ध आणि नैसर्गिक हमी",
+        }
+
+    steps = ch.get("steps")
+    if not isinstance(steps, list) or not steps:
+        steps = ["निवड", "प्रक्रिया", "चाचणी", "वितरण"]
+    return {"type": "process_steps", "title": scene or "कार्यपद्धती", "steps": steps}
+
+
 def normalize_chapter(
     ch: dict,
     index: int,
@@ -409,7 +454,18 @@ def normalize_chapter(
     map_loc = ch.get("map_location") or ch.get("location") or fallback_map
     custom_img = ch.get("custom_image_url") or ch.get("image_url")
     highlight_stat = ch.get("highlight_stat") or ch.get("stamp_text")
-    vector_graphic = ch.get("vector_graphic") if isinstance(ch.get("vector_graphic"), dict) else None
+    graphic_type = ch.get("graphic_type")
+    graphic_type_str = str(graphic_type).strip().lower() if graphic_type else None
+    vector_graphic = (
+        ch.get("vector_graphic") if isinstance(ch.get("vector_graphic"), dict) else None
+    )
+    if vector_graphic is None and graphic_type_str:
+        vector_graphic = build_vector_graphic_from_type(graphic_type_str, ch)
+
+    part_number = ch.get("part_number")
+    series_title = ch.get("series_title")
+    brand_theme = ch.get("brand_theme")
+
     return {
         "scene": scene,
         "marathi_narration": narration,
@@ -417,7 +473,11 @@ def normalize_chapter(
         "map_location": map_loc,
         "custom_image_url": custom_img,
         "highlight_stat": str(highlight_stat).strip() if highlight_stat else None,
+        "graphic_type": graphic_type_str,
         "vector_graphic": vector_graphic,
+        "part_number": part_number,
+        "series_title": str(series_title).strip() if series_title else None,
+        "brand_theme": str(brand_theme).strip() if brand_theme else None,
     }
 
 
@@ -691,16 +751,55 @@ def extract_chapters(payload: dict) -> tuple[dict, dict, list[dict], str]:
     )
 
 
-def resolve_theme(data: dict, script_data: dict) -> tuple[str, dict]:
-    """Select visual theme from script_data.branding.theme or fallback to Documentary."""
+def _parse_hex_rgb(hex_color: str | None) -> tuple[int, int, int] | None:
+    """Parse #RRGGBB or #RGB into an (r, g, b) tuple."""
+    if not isinstance(hex_color, str):
+        return None
+    s = hex_color.strip().lstrip("#")
+    if len(s) == 3:
+        s = "".join(c * 2 for c in s)
+    if len(s) != 6:
+        return None
+    try:
+        return (int(s[0:2], 16), int(s[2:4], 16), int(s[4:6], 16))
+    except ValueError:
+        return None
+
+
+def resolve_theme(
+    data: dict, script_data: dict, chapters: list[dict] | None = None
+) -> tuple[str, dict]:
+    """Select visual theme from branding/chapter brand_theme with optional accent_color override."""
     branding = script_data.get("branding") or data.get("branding") or {}
-    if isinstance(branding, dict):
-        theme_name = str(branding.get("theme") or "").strip()
-    else:
-        theme_name = ""
+    if not isinstance(branding, dict):
+        branding = {}
+
+    chap_theme = ""
+    if chapters:
+        for ch in chapters:
+            if ch.get("brand_theme"):
+                chap_theme = str(ch["brand_theme"]).strip()
+                break
+
+    theme_name = str(
+        branding.get("theme")
+        or branding.get("brand_theme")
+        or data.get("brand_theme")
+        or chap_theme
+        or ""
+    ).strip()
     if theme_name not in THEMES:
         theme_name = "Documentary"
-    return theme_name, THEMES[theme_name]
+
+    resolved = dict(THEMES[theme_name])
+    accent_rgb = _parse_hex_rgb(
+        branding.get("accent_color") or data.get("accent_color")
+    )
+    if accent_rgb:
+        resolved["accent"] = accent_rgb
+        resolved["card_border"] = (*accent_rgb, 175)
+        resolved["path_rgba"] = (*accent_rgb, 120)
+    return theme_name, resolved
 
 
 def split_caption_chunks(
@@ -980,6 +1079,41 @@ def draw_chapter_card(
             upem,
         )
 
+    # Series / part badge (subtle non-overlapping header label)
+    series_title = card.get("series_title")
+    part_number = card.get("part_number")
+    series_parts: list[str] = []
+    if series_title:
+        series_parts.append(str(series_title).strip())
+    if part_number is not None and str(part_number).strip():
+        series_parts.append(f"भाग {str(part_number).strip()}")
+    series_label = " · ".join(series_parts)
+    if series_label:
+        s_w = measure_shaped_width(series_label, badge_font, hb_font, upem)
+        left_bound = (-half_w + 36 + (measure_shaped_width(loc_text, badge_font, hb_font, upem) + 96)) if loc_text else (-half_w + 36)
+        right_bound = half_w - num_w - 104
+        if card.get("highlight_stat"):
+            right_bound -= measure_shaped_width(card["highlight_stat"], badge_font, hb_font, upem) + 84
+        if right_bound - left_bound >= s_w + 40:
+            sx = left_bound + ((right_bound - left_bound) - (s_w + 40)) * 0.5 if loc_text else (-half_w + 36)
+            s_pill = skia.RRect.MakeRectXY(
+                skia.Rect.MakeXYWH(sx, -half_h + 36, s_w + 40, 52), 26, 26
+            )
+            canvas.drawRRect(
+                s_pill,
+                skia.Paint(Color=skia.ColorSetARGB(185, 15, 23, 42), AntiAlias=True),
+            )
+            draw_shaped_text(
+                canvas,
+                series_label,
+                sx + 20,
+                -half_h + 73,
+                badge_font,
+                skia.Paint(Color=skia.ColorSetRGB(226, 232, 240), AntiAlias=True),
+                hb_font,
+                upem,
+            )
+
     # Kinetic Marathi callout stamp (top-right next to counter pill, enters at 0.5s)
     stamp_text = card.get("highlight_stat")
     if stamp_text and (not is_active or elapsed_sec >= 0.5):
@@ -1242,9 +1376,9 @@ def render_world_canvas(
 
 
 def infer_vector_graphic(chapter: dict) -> dict | None:
-    """Auto-infer a clean Skia vector graphic for abstract chapters without map/custom photo."""
-    if isinstance(chapter.get("vector_graphic"), dict):
-        return chapter["vector_graphic"]
+    """Auto-infer a clean Skia vector graphic for abstract chapters without explicit specs."""
+    if isinstance(chapter.get("vector_graphic"), dict) or chapter.get("graphic_type"):
+        return chapter.get("vector_graphic")
     if format_map_location(chapter.get("map_location")) or chapter.get("custom_image_url"):
         return None
 
@@ -1356,7 +1490,9 @@ def main() -> None:
 
     data, script_data, chapters, video_title = extract_chapters(payload)
     apply_chapter_enhancements(chapters, data, script_data)
-    theme_name, theme = resolve_theme(data, script_data)
+    theme_name, theme = resolve_theme(data, script_data, chapters)
+    default_series = script_data.get("series_title") or data.get("series_title")
+    default_part = script_data.get("part_number") or data.get("part_number")
     print(f"Normalized data keys: {list(data.keys())}")
     print(f"Using theme: {theme_name} | Total parsed chapters: {len(chapters)}")
 
@@ -1422,6 +1558,8 @@ def main() -> None:
                 "map_location": map_location,
                 "highlight_stat": highlight_stat,
                 "vector_graphic": chapter.get("vector_graphic"),
+                "part_number": chapter.get("part_number") if chapter.get("part_number") is not None else default_part,
+                "series_title": chapter.get("series_title") or default_series,
                 "skia_img": skia_img,
                 "duration": duration,
                 "start_sec": start_sec,
