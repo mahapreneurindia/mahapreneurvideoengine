@@ -4,6 +4,76 @@ import skia
 from make_map import _draw_label, _get_font_resources, _measure_label
 
 
+def _truncate_line_to_width(
+    text: str, font: skia.Font, max_width: float, hb_font, upem: int
+) -> str:
+    """Truncate text with ellipsis so its shaped width never exceeds max_width."""
+    if _measure_label(text, font, hb_font, upem) <= max_width:
+        return text
+    ellipsis = "…"
+    trimmed = text.rstrip()
+    while trimmed and _measure_label(trimmed + ellipsis, font, hb_font, upem) > max_width:
+        trimmed = trimmed[:-1]
+    return (trimmed + ellipsis) if trimmed else ellipsis
+
+
+def _wrap_lines(
+    text: str, font: skia.Font, max_width: float, hb_font, upem: int
+) -> list[str]:
+    """Word-wrap text within max_width, breaking long single tokens if needed."""
+    words = text.split()
+    if not words:
+        return []
+    lines: list[str] = []
+    current = words[0]
+    for word in words[1:]:
+        candidate = f"{current} {word}"
+        if _measure_label(candidate, font, hb_font, upem) <= max_width:
+            current = candidate
+        else:
+            lines.append(current)
+            current = word
+    lines.append(current)
+    return lines
+
+
+def _fit_text_lines(
+    text: str,
+    typeface: skia.Typeface,
+    base_size: float,
+    min_size: float,
+    max_width: float,
+    max_lines: int,
+    hb_font,
+    upem: int,
+) -> tuple[skia.Font, list[str]]:
+    """Step down font size until wrapped lines fit within max_width and max_lines."""
+    cleaned = " ".join((text or "").split())
+    if not cleaned:
+        return skia.Font(typeface, base_size), []
+
+    size = base_size
+    while size >= min_size:
+        font = skia.Font(typeface, size)
+        lines = _wrap_lines(cleaned, font, max_width, hb_font, upem)
+        if len(lines) <= max_lines and all(
+            _measure_label(ln, font, hb_font, upem) <= max_width for ln in lines
+        ):
+            return font, lines
+        size -= 2.0
+
+    font = skia.Font(typeface, min_size)
+    lines = _wrap_lines(cleaned, font, max_width, hb_font, upem)
+    if len(lines) > max_lines:
+        kept = lines[: max_lines - 1]
+        overflow = " ".join(lines[max_lines - 1 :])
+        kept.append(_truncate_line_to_width(overflow, font, max_width, hb_font, upem))
+        lines = kept
+    else:
+        lines = [_truncate_line_to_width(ln, font, max_width, hb_font, upem) for ln in lines]
+    return font, lines
+
+
 def _draw_check_icon(canvas: skia.Canvas, cx: float, cy: float, r: float, alpha: int) -> None:
     """Draw a green circular badge with a white vector checkmark."""
     canvas.drawCircle(
@@ -60,49 +130,60 @@ def _draw_checklist(
 ) -> None:
     title = str(spec.get("title") or "").strip()
     items = [str(x).strip() for x in (spec.get("items") or []) if str(x).strip()][:4]
-    title_font = skia.Font(typeface, 30)
-    item_font = skia.Font(typeface, 28)
 
-    y_cursor = rect.top() + 56.0
+    y_cursor = rect.top() + 52.0
     if title:
-        _draw_label(
-            canvas,
-            title,
-            rect.left() + 36.0,
-            y_cursor,
-            title_font,
-            skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
-            hb_font,
-            upem,
+        t_font, t_lines = _fit_text_lines(
+            title, typeface, 28.0, 20.0, rect.width() - 72.0, 1, hb_font, upem
         )
-        y_cursor += 54.0
+        if t_lines:
+            _draw_label(
+                canvas,
+                t_lines[0],
+                rect.left() + 36.0,
+                y_cursor,
+                t_font,
+                skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
+                hb_font,
+                upem,
+            )
+        y_cursor += 48.0
 
     if not items:
         return
 
-    row_step = min(76.0, max(54.0, (rect.bottom() - y_cursor - 24.0) / len(items)))
+    row_step = min(84.0, max(56.0, (rect.bottom() - y_cursor - 20.0) / len(items)))
+    text_max_w = max(80.0, rect.width() - 128.0)
+
     for idx, label in enumerate(items):
         start_t = idx * (0.65 / max(1, len(items)))
         local = max(0.0, min(1.0, (t - start_t) / 0.35))
         eased = 1.0 - (1.0 - local) ** 3
         alpha = int(255 * eased)
-        slide_x = (1.0 - eased) * 28.0
+        slide_x = (1.0 - eased) * 26.0
         if alpha <= 0:
             continue
 
-        cy = y_cursor + idx * row_step + 16.0
-        cx = rect.left() + 54.0 + slide_x
-        _draw_check_icon(canvas, cx, cy, 16.0, alpha)
-        _draw_label(
-            canvas,
-            label,
-            cx + 32.0,
-            cy + 10.0,
-            item_font,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 241, 245, 249), AntiAlias=True),
-            hb_font,
-            upem,
+        cy = y_cursor + idx * row_step + 18.0
+        cx = rect.left() + 52.0 + slide_x
+        _draw_check_icon(canvas, cx, cy, 15.0, alpha)
+
+        i_font, i_lines = _fit_text_lines(
+            label, typeface, 26.0, 18.0, text_max_w, 2, hb_font, upem
         )
+        line_h = i_font.getSize() + 6.0
+        first_y = cy + (8.0 if len(i_lines) == 1 else -2.0)
+        for li, line in enumerate(i_lines):
+            _draw_label(
+                canvas,
+                line,
+                cx + 30.0,
+                first_y + li * line_h,
+                i_font,
+                skia.Paint(Color=skia.ColorSetARGB(alpha, 241, 245, 249), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
 
 def _draw_comparison(
@@ -119,11 +200,9 @@ def _draw_comparison(
     left_items = [str(x).strip() for x in (spec.get("left_items") or []) if str(x).strip()][:4]
     right_items = [str(x).strip() for x in (spec.get("right_items") or []) if str(x).strip()][:4]
 
-    head_font = skia.Font(typeface, 28)
-    item_font = skia.Font(typeface, 24)
     mid_x = rect.left() + rect.width() * 0.5
+    col_w = rect.width() * 0.5 - 48.0
 
-    # Vertical divider
     canvas.drawLine(
         mid_x,
         rect.top() + 28.0,
@@ -136,57 +215,75 @@ def _draw_comparison(
     left_eased = 1.0 - (1.0 - left_t) ** 3
     left_alpha = int(255 * left_eased)
     if left_alpha > 0:
-        _draw_label(
-            canvas,
-            left_title,
-            rect.left() + 32.0,
-            rect.top() + 54.0,
-            head_font,
-            skia.Paint(Color=skia.ColorSetARGB(left_alpha, 248, 113, 113), AntiAlias=True),
-            hb_font,
-            upem,
+        lh_font, lh_lines = _fit_text_lines(
+            left_title, typeface, 26.0, 18.0, col_w, 1, hb_font, upem
         )
-        for idx, item in enumerate(left_items):
-            cy = rect.top() + 106.0 + idx * 64.0
-            _draw_cross_icon(canvas, rect.left() + 48.0, cy, 13.0, left_alpha)
+        if lh_lines:
             _draw_label(
                 canvas,
-                item,
-                rect.left() + 74.0,
-                cy + 8.0,
-                item_font,
-                skia.Paint(Color=skia.ColorSetARGB(left_alpha, 226, 232, 240), AntiAlias=True),
+                lh_lines[0],
+                rect.left() + 28.0,
+                rect.top() + 52.0,
+                lh_font,
+                skia.Paint(Color=skia.ColorSetARGB(left_alpha, 248, 113, 113), AntiAlias=True),
                 hb_font,
                 upem,
             )
+        row_h = min(72.0, max(52.0, (rect.height() - 104.0) / max(1, len(left_items))))
+        for idx, item in enumerate(left_items):
+            cy = rect.top() + 102.0 + idx * row_h
+            _draw_cross_icon(canvas, rect.left() + 44.0, cy, 12.0, left_alpha)
+            li_font, li_lines = _fit_text_lines(
+                item, typeface, 22.0, 16.0, col_w - 42.0, 2, hb_font, upem
+            )
+            for l_idx, line in enumerate(li_lines):
+                _draw_label(
+                    canvas,
+                    line,
+                    rect.left() + 68.0,
+                    cy + (7.0 if len(li_lines) == 1 else -2.0) + l_idx * (li_font.getSize() + 4.0),
+                    li_font,
+                    skia.Paint(Color=skia.ColorSetARGB(left_alpha, 226, 232, 240), AntiAlias=True),
+                    hb_font,
+                    upem,
+                )
 
     right_t = max(0.0, min(1.0, (t - 0.45) / 0.45))
     right_eased = 1.0 - (1.0 - right_t) ** 3
     right_alpha = int(255 * right_eased)
     if right_alpha > 0:
-        _draw_label(
-            canvas,
-            right_title,
-            mid_x + 28.0,
-            rect.top() + 54.0,
-            head_font,
-            skia.Paint(Color=skia.ColorSetARGB(right_alpha, 74, 222, 128), AntiAlias=True),
-            hb_font,
-            upem,
+        rh_font, rh_lines = _fit_text_lines(
+            right_title, typeface, 26.0, 18.0, col_w, 1, hb_font, upem
         )
-        for idx, item in enumerate(right_items):
-            cy = rect.top() + 106.0 + idx * 64.0
-            _draw_check_icon(canvas, mid_x + 44.0, cy, 13.0, right_alpha)
+        if rh_lines:
             _draw_label(
                 canvas,
-                item,
-                mid_x + 70.0,
-                cy + 8.0,
-                item_font,
-                skia.Paint(Color=skia.ColorSetARGB(right_alpha, 248, 250, 252), AntiAlias=True),
+                rh_lines[0],
+                mid_x + 24.0,
+                rect.top() + 52.0,
+                rh_font,
+                skia.Paint(Color=skia.ColorSetARGB(right_alpha, 74, 222, 128), AntiAlias=True),
                 hb_font,
                 upem,
             )
+        row_h = min(72.0, max(52.0, (rect.height() - 104.0) / max(1, len(right_items))))
+        for idx, item in enumerate(right_items):
+            cy = rect.top() + 102.0 + idx * row_h
+            _draw_check_icon(canvas, mid_x + 40.0, cy, 12.0, right_alpha)
+            ri_font, ri_lines = _fit_text_lines(
+                item, typeface, 22.0, 16.0, col_w - 42.0, 2, hb_font, upem
+            )
+            for l_idx, line in enumerate(ri_lines):
+                _draw_label(
+                    canvas,
+                    line,
+                    mid_x + 64.0,
+                    cy + (7.0 if len(ri_lines) == 1 else -2.0) + l_idx * (ri_font.getSize() + 4.0),
+                    ri_font,
+                    skia.Paint(Color=skia.ColorSetARGB(right_alpha, 248, 250, 252), AntiAlias=True),
+                    hb_font,
+                    upem,
+                )
 
 
 def _draw_stat_counter(
@@ -199,7 +296,7 @@ def _draw_stat_counter(
     upem: int,
 ) -> None:
     target_val = float(spec.get("target_value") or 100)
-    suffix = str(spec.get("suffix") or "%")
+    suffix = str(spec.get("suffix") if spec.get("suffix") is not None else "%")
     subtitle = str(spec.get("subtitle") or spec.get("title") or "").strip()
 
     eased = 1.0 - (1.0 - t) ** 3
@@ -207,11 +304,10 @@ def _draw_stat_counter(
     val_text = f"{curr_val}{suffix}"
 
     cx = rect.left() + rect.width() * 0.5
-    cy = rect.top() + rect.height() * 0.44
-    radius = min(rect.width(), rect.height()) * 0.25
+    cy = rect.top() + rect.height() * 0.41
+    radius = min(rect.width(), rect.height()) * 0.24
 
     arc_rect = skia.Rect.MakeLTRB(cx - radius, cy - radius, cx + radius, cy + radius)
-    # Track ring
     canvas.drawCircle(
         cx,
         cy,
@@ -223,8 +319,10 @@ def _draw_stat_counter(
             AntiAlias=True,
         ),
     )
-    # Animated amber progress arc
-    sweep_deg = 360.0 * min(1.0, target_val / 100.0 if suffix == "%" else 1.0) * eased
+
+    is_percent = "%" in suffix
+    ring_frac = max(0.05, min(1.0, target_val / 100.0)) if is_percent else 0.88
+    sweep_deg = 360.0 * ring_frac * eased
     canvas.drawArc(
         arc_rect,
         -90.0,
@@ -239,32 +337,40 @@ def _draw_stat_counter(
         ),
     )
 
-    num_font = skia.Font(typeface, 56)
-    nw = _measure_label(val_text, num_font, hb_font, upem)
-    _draw_label(
-        canvas,
-        val_text,
-        cx - nw * 0.5,
-        cy + 20.0,
-        num_font,
-        skia.Paint(Color=skia.ColorWHITE, AntiAlias=True),
-        hb_font,
-        upem,
+    num_font, num_lines = _fit_text_lines(
+        val_text, typeface, 54.0, 30.0, radius * 1.55, 1, hb_font, upem
     )
-
-    if subtitle:
-        sub_font = skia.Font(typeface, 28)
-        sw = _measure_label(subtitle, sub_font, hb_font, upem)
+    if num_lines:
+        nw = _measure_label(num_lines[0], num_font, hb_font, upem)
         _draw_label(
             canvas,
-            subtitle,
-            cx - sw * 0.5,
-            rect.bottom() - 42.0,
-            sub_font,
-            skia.Paint(Color=skia.ColorSetRGB(254, 243, 199), AntiAlias=True),
+            num_lines[0],
+            cx - nw * 0.5,
+            cy + num_font.getSize() * 0.34,
+            num_font,
+            skia.Paint(Color=skia.ColorWHITE, AntiAlias=True),
             hb_font,
             upem,
         )
+
+    if subtitle:
+        sub_font, sub_lines = _fit_text_lines(
+            subtitle, typeface, 26.0, 18.0, rect.width() - 64.0, 2, hb_font, upem
+        )
+        line_h = sub_font.getSize() + 6.0
+        start_y = rect.bottom() - 26.0 - (len(sub_lines) - 1) * line_h
+        for li, line in enumerate(sub_lines):
+            sw = _measure_label(line, sub_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                line,
+                cx - sw * 0.5,
+                start_y + li * line_h,
+                sub_font,
+                skia.Paint(Color=skia.ColorSetRGB(254, 243, 199), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
 
 def _draw_process_steps(
@@ -281,31 +387,33 @@ def _draw_process_steps(
     if not steps:
         return
 
-    title_font = skia.Font(typeface, 28)
     node_font = skia.Font(typeface, 24)
-    label_font = skia.Font(typeface, 22)
 
     if title:
-        tw = _measure_label(title, title_font, hb_font, upem)
-        _draw_label(
-            canvas,
-            title,
-            rect.left() + (rect.width() - tw) * 0.5,
-            rect.top() + 52.0,
-            title_font,
-            skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
-            hb_font,
-            upem,
+        t_font, t_lines = _fit_text_lines(
+            title, typeface, 28.0, 20.0, rect.width() - 64.0, 1, hb_font, upem
         )
+        if t_lines:
+            tw = _measure_label(t_lines[0], t_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                t_lines[0],
+                rect.left() + (rect.width() - tw) * 0.5,
+                rect.top() + 50.0,
+                t_font,
+                skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
     n = len(steps)
-    margin_x = 80.0
+    margin_x = 84.0
     span_w = max(80.0, rect.width() - margin_x * 2)
     step_dx = span_w / max(1, n - 1) if n > 1 else 0.0
-    cy = rect.top() + rect.height() * 0.52
+    cy = rect.top() + rect.height() * 0.48
     node_r = 28.0
+    label_max_w = max(80.0, (rect.width() - 48.0) / n - 12.0)
 
-    # Draw connecting animated arrows first
     for i in range(n - 1):
         seg_start = i / max(1, n)
         seg_t = max(0.0, min(1.0, (t - seg_start) / (0.8 / max(1, n))))
@@ -329,7 +437,6 @@ def _draw_process_steps(
             head.lineTo(x2 - 10.0, cy + 8.0)
             canvas.drawPath(head, arrow_paint)
 
-    # Draw nodes and labels
     for i, label in enumerate(steps):
         node_start = i / max(1, n)
         local = max(0.0, min(1.0, (t - node_start) / 0.25))
@@ -359,17 +466,22 @@ def _draw_process_steps(
             upem,
         )
 
-        lw = _measure_label(label, label_font, hb_font, upem)
-        _draw_label(
-            canvas,
-            label,
-            nx - lw * 0.5,
-            cy + node_r + 36.0,
-            label_font,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 241, 245, 249), AntiAlias=True),
-            hb_font,
-            upem,
+        l_font, l_lines = _fit_text_lines(
+            label, typeface, 22.0, 15.0, label_max_w, 2, hb_font, upem
         )
+        line_h = l_font.getSize() + 4.0
+        for li, line in enumerate(l_lines):
+            lw = _measure_label(line, l_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                line,
+                nx - lw * 0.5,
+                cy + node_r + 34.0 + li * line_h,
+                l_font,
+                skia.Paint(Color=skia.ColorSetARGB(alpha, 241, 245, 249), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
 
 def _draw_whiteboard(
@@ -386,48 +498,49 @@ def _draw_whiteboard(
     raw_items = spec.get("items") or spec.get("steps") or spec.get("nodes") or []
     items = [str(x).strip() for x in raw_items if str(x).strip()][:4]
 
-    title_font = skia.Font(typeface, 28)
-    item_font = skia.Font(typeface, 23)
-    y_top = rect.top() + 50.0
-
+    y_top = rect.top() + 48.0
     if title:
-        tw = _measure_label(title, title_font, hb_font, upem)
+        t_font, t_lines = _fit_text_lines(
+            title, typeface, 26.0, 18.0, rect.width() - 72.0, 1, hb_font, upem
+        )
         tx = rect.left() + 36.0
-        _draw_label(
-            canvas,
-            title,
-            tx,
-            y_top,
-            title_font,
-            skia.Paint(Color=skia.ColorSetRGB(17, 24, 39), AntiAlias=True),
-            hb_font,
-            upem,
-        )
-        line_t = min(1.0, t / 0.25)
-        canvas.drawLine(
-            tx,
-            y_top + 10.0,
-            tx + tw * line_t,
-            y_top + 10.0,
-            skia.Paint(
-                Color=skia.ColorSetRGB(217, 119, 6),
-                Style=skia.Paint.kStroke_Style,
-                StrokeWidth=3.5,
-                StrokeCap=skia.Paint.kRound_Cap,
-                AntiAlias=True,
-            ),
-        )
-        y_top += 44.0
+        if t_lines:
+            tw = _measure_label(t_lines[0], t_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                t_lines[0],
+                tx,
+                y_top,
+                t_font,
+                skia.Paint(Color=skia.ColorSetRGB(17, 24, 39), AntiAlias=True),
+                hb_font,
+                upem,
+            )
+            line_t = min(1.0, t / 0.25)
+            canvas.drawLine(
+                tx,
+                y_top + 10.0,
+                tx + tw * line_t,
+                y_top + 10.0,
+                skia.Paint(
+                    Color=skia.ColorSetRGB(217, 119, 6),
+                    Style=skia.Paint.kStroke_Style,
+                    StrokeWidth=3.5,
+                    StrokeCap=skia.Paint.kRound_Cap,
+                    AntiAlias=True,
+                ),
+            )
+        y_top += 42.0
 
     if not items:
         return
 
     n = len(items)
-    pad_x = 34.0
-    gap = 28.0
+    pad_x = 32.0
+    gap = 24.0
     avail_w = rect.width() - pad_x * 2 - gap * max(0, n - 1)
     box_w = avail_w / n
-    box_h = min(170.0, max(110.0, rect.bottom() - y_top - 48.0))
+    box_h = min(190.0, max(120.0, rect.bottom() - y_top - 42.0))
     box_y = y_top + (rect.bottom() - y_top - box_h) * 0.45
 
     for idx, label in enumerate(items):
@@ -438,7 +551,7 @@ def _draw_whiteboard(
             continue
         alpha = int(255 * eased)
         bx = rect.left() + pad_x + idx * (box_w + gap)
-        by = box_y + (1.0 - eased) * 18.0
+        by = box_y + (1.0 - eased) * 16.0
         box_rect = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(bx, by, box_w, box_h), 14, 14)
 
         canvas.drawRRect(
@@ -454,28 +567,33 @@ def _draw_whiteboard(
                 AntiAlias=True,
             ),
         )
-        # Number / bullet dot
         canvas.drawCircle(
             bx + 22.0,
             by + 24.0,
-            10.0,
+            9.0,
             skia.Paint(Color=skia.ColorSetARGB(alpha, 217, 119, 6), AntiAlias=True),
         )
-        lw = _measure_label(label, item_font, hb_font, upem)
-        lx = bx + max(12.0, (box_w - lw) * 0.5)
-        ly = by + box_h * 0.62
-        _draw_label(
-            canvas,
-            label,
-            lx,
-            ly,
-            item_font,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 17, 24, 39), AntiAlias=True),
-            hb_font,
-            upem,
-        )
 
-        # Connector arrow to next box
+        i_font, i_lines = _fit_text_lines(
+            label, typeface, 22.0, 15.0, box_w - 28.0, 3, hb_font, upem
+        )
+        line_h = i_font.getSize() + 5.0
+        text_block_h = len(i_lines) * line_h
+        text_start_y = by + 44.0 + max(0.0, (box_h - 52.0 - text_block_h) * 0.5) + i_font.getSize() * 0.85
+        for li, line in enumerate(i_lines):
+            lw = _measure_label(line, i_font, hb_font, upem)
+            lx = bx + (box_w - lw) * 0.5
+            _draw_label(
+                canvas,
+                line,
+                lx,
+                text_start_y + li * line_h,
+                i_font,
+                skia.Paint(Color=skia.ColorSetARGB(alpha, 17, 24, 39), AntiAlias=True),
+                hb_font,
+                upem,
+            )
+
         if idx < n - 1:
             arrow_t = max(0.0, min(1.0, (t - (start_t + 0.15)) / 0.2))
             if arrow_t > 0.0:
@@ -522,16 +640,13 @@ def _draw_stick_figure(
     head_y = cy - 42.0 * scale
     canvas.drawCircle(cx, head_y, head_r, stroke)
 
-    # Torso
     neck_y = head_y + head_r
     hip_y = cy + 16.0 * scale
     canvas.drawLine(cx, neck_y, cx, hip_y, stroke)
 
-    # Legs
     canvas.drawLine(cx, hip_y, cx - 18.0 * scale, hip_y + 34.0 * scale, stroke)
     canvas.drawLine(cx, hip_y, cx + 18.0 * scale, hip_y + 34.0 * scale, stroke)
 
-    # Arms with gesture
     sh_y = neck_y + 10.0 * scale
     canvas.drawLine(cx, sh_y, cx - 22.0 * scale, sh_y + 18.0 * scale, stroke)
     g = (gesture or "").lower()
@@ -575,27 +690,28 @@ def _draw_stick_diagram(
     else:
         raw_figures = raw_figures[:3]
 
-    title_font = skia.Font(typeface, 28)
-    label_font = skia.Font(typeface, 22)
-    y_top = rect.top() + 50.0
-
+    y_top = rect.top() + 48.0
     if title:
-        tw = _measure_label(title, title_font, hb_font, upem)
-        _draw_label(
-            canvas,
-            title,
-            rect.left() + (rect.width() - tw) * 0.5,
-            y_top,
-            title_font,
-            skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
-            hb_font,
-            upem,
+        t_font, t_lines = _fit_text_lines(
+            title, typeface, 26.0, 18.0, rect.width() - 64.0, 1, hb_font, upem
         )
+        if t_lines:
+            tw = _measure_label(t_lines[0], t_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                t_lines[0],
+                rect.left() + (rect.width() - tw) * 0.5,
+                y_top,
+                t_font,
+                skia.Paint(Color=skia.ColorSetRGB(251, 191, 36), AntiAlias=True),
+                hb_font,
+                upem,
+            )
         y_top += 34.0
 
     n = len(raw_figures)
     slot_w = rect.width() / max(1, n)
-    fig_cy = y_top + (rect.bottom() - y_top) * 0.42
+    fig_cy = y_top + (rect.bottom() - y_top) * 0.36
 
     for idx, fig in enumerate(raw_figures):
         if isinstance(fig, dict):
@@ -613,18 +729,20 @@ def _draw_stick_diagram(
         alpha = int(255 * eased)
         fx = rect.left() + slot_w * (idx + 0.5)
 
-        _draw_stick_figure(canvas, fx, fig_cy, 1.05, gesture, alpha, t)
+        _draw_stick_figure(canvas, fx, fig_cy, 1.0, gesture, alpha, t)
 
-        # Callout node pill below figure
-        lw = _measure_label(label, label_font, hb_font, upem)
-        pill_w = min(slot_w - 24.0, lw + 36.0)
-        pill_h = 44.0
+        pill_w = max(90.0, slot_w - 28.0)
+        l_font, l_lines = _fit_text_lines(
+            label, typeface, 21.0, 15.0, pill_w - 28.0, 2, hb_font, upem
+        )
+        line_h = l_font.getSize() + 4.0
+        pill_h = max(44.0, len(l_lines) * line_h + 18.0)
         px = fx - pill_w * 0.5
-        py = fig_cy + 68.0
+        py = min(rect.bottom() - pill_h - 18.0, fig_cy + 62.0)
         pill_rect = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(px, py, pill_w, pill_h), 14, 14)
         canvas.drawRRect(
             pill_rect,
-            skia.Paint(Color=skia.ColorSetARGB(int(210 * eased), 30, 41, 59), AntiAlias=True),
+            skia.Paint(Color=skia.ColorSetARGB(int(215 * eased), 30, 41, 59), AntiAlias=True),
         )
         canvas.drawRRect(
             pill_rect,
@@ -635,23 +753,25 @@ def _draw_stick_diagram(
                 AntiAlias=True,
             ),
         )
-        _draw_label(
-            canvas,
-            label,
-            fx - lw * 0.5,
-            py + 30.0,
-            label_font,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 248, 250, 252), AntiAlias=True),
-            hb_font,
-            upem,
-        )
+        text_y = py + 14.0 + l_font.getSize() * 0.85
+        for li, line in enumerate(l_lines):
+            lw = _measure_label(line, l_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                line,
+                fx - lw * 0.5,
+                text_y + li * line_h,
+                l_font,
+                skia.Paint(Color=skia.ColorSetARGB(alpha, 248, 250, 252), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
-        # Connecting arrow between figures
         if idx < n - 1:
             arrow_t = max(0.0, min(1.0, (t - (start_t + 0.15)) / 0.2))
             if arrow_t > 0.0:
-                ax1 = fx + 44.0
-                ax2 = ax1 + (slot_w - 88.0) * arrow_t
+                ax1 = fx + 42.0
+                ax2 = ax1 + (slot_w - 84.0) * arrow_t
                 apaint = skia.Paint(
                     Color=skia.ColorSetARGB(alpha, 56, 189, 248),
                     Style=skia.Paint.kStroke_Style,
@@ -671,7 +791,6 @@ def _draw_blueprint(
     upem: int,
 ) -> None:
     """Technical blueprint panel with cyan grid, dimension lines, and schematic blocks."""
-    # Subtle cyan grid
     grid_paint = skia.Paint(
         Color=skia.ColorSetARGB(42, 56, 189, 248),
         StrokeWidth=1.0,
@@ -687,7 +806,6 @@ def _draw_blueprint(
         canvas.drawLine(rect.left(), gy, rect.right(), gy, grid_paint)
         gy += step
 
-    # Animated inner technical frame + dimension ticks
     frame_t = min(1.0, t / 0.25)
     inner = skia.Rect.MakeLTRB(
         rect.left() + 18.0,
@@ -709,31 +827,32 @@ def _draw_blueprint(
     raw_nodes = spec.get("nodes") or spec.get("steps") or spec.get("items") or []
     nodes = [str(x).strip() for x in raw_nodes if str(x).strip()][:4]
 
-    title_font = skia.Font(typeface, 28)
-    node_font = skia.Font(typeface, 22)
-    y_top = rect.top() + 56.0
-
+    y_top = rect.top() + 54.0
     if title:
-        _draw_label(
-            canvas,
-            title,
-            rect.left() + 36.0,
-            y_top,
-            title_font,
-            skia.Paint(Color=skia.ColorSetRGB(224, 242, 254), AntiAlias=True),
-            hb_font,
-            upem,
+        t_font, t_lines = _fit_text_lines(
+            title, typeface, 26.0, 18.0, rect.width() - 72.0, 1, hb_font, upem
         )
+        if t_lines:
+            _draw_label(
+                canvas,
+                t_lines[0],
+                rect.left() + 36.0,
+                y_top,
+                t_font,
+                skia.Paint(Color=skia.ColorSetRGB(224, 242, 254), AntiAlias=True),
+                hb_font,
+                upem,
+            )
         y_top += 42.0
 
     if not nodes:
         return
 
     n = len(nodes)
-    pad_x = 36.0
-    gap = 24.0
+    pad_x = 34.0
+    gap = 22.0
     box_w = (rect.width() - pad_x * 2 - gap * max(0, n - 1)) / n
-    box_h = min(150.0, max(95.0, rect.bottom() - y_top - 58.0))
+    box_h = min(165.0, max(105.0, rect.bottom() - y_top - 48.0))
     box_y = y_top + (rect.bottom() - y_top - box_h) * 0.45
 
     for idx, label in enumerate(nodes):
@@ -761,7 +880,6 @@ def _draw_blueprint(
             ),
         )
 
-        # Corner crosshairs
         cross_paint = skia.Paint(
             Color=skia.ColorSetARGB(alpha, 224, 242, 254),
             StrokeWidth=1.5,
@@ -771,19 +889,25 @@ def _draw_blueprint(
             canvas.drawLine(cx_c - 6, cy_c, cx_c + 6, cy_c, cross_paint)
             canvas.drawLine(cx_c, cy_c - 6, cx_c, cy_c + 6, cross_paint)
 
-        lw = _measure_label(label, node_font, hb_font, upem)
-        _draw_label(
-            canvas,
-            label,
-            bx + max(10.0, (box_w - lw) * 0.5),
-            by + box_h * 0.58,
-            node_font,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 224, 242, 254), AntiAlias=True),
-            hb_font,
-            upem,
+        n_font, n_lines = _fit_text_lines(
+            label, typeface, 21.0, 15.0, box_w - 22.0, 3, hb_font, upem
         )
+        line_h = n_font.getSize() + 5.0
+        text_block_h = len(n_lines) * line_h
+        text_start_y = by + max(16.0, (box_h - text_block_h) * 0.5) + n_font.getSize() * 0.85
+        for li, line in enumerate(n_lines):
+            lw = _measure_label(line, n_font, hb_font, upem)
+            _draw_label(
+                canvas,
+                line,
+                bx + (box_w - lw) * 0.5,
+                text_start_y + li * line_h,
+                n_font,
+                skia.Paint(Color=skia.ColorSetARGB(alpha, 224, 242, 254), AntiAlias=True),
+                hb_font,
+                upem,
+            )
 
-        # Dimension leader line below box
         if idx < n - 1:
             lx1 = bx + box_w
             lx2 = lx1 + gap * eased
@@ -805,7 +929,6 @@ def draw_vector_graphic(
     gtype = str(spec.get("type") or "").strip().lower()
     rrect = skia.RRect.MakeRectXY(rect, 22, 22)
 
-    # Soft drop shadow
     shadow_rect = skia.RRect.MakeRectXY(
         skia.Rect.MakeXYWH(rect.left() + 8, rect.top() + 12, rect.width(), rect.height()),
         22,

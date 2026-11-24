@@ -95,15 +95,17 @@ def create_framed_card(
 
 
 def _has_sufficient_detail(image_path: str) -> bool:
-    """Reject nearly uniform or plain sky/gradient fallback images."""
+    """Reject nearly uniform or plain sky/horizon gradient fallback images."""
     try:
         gray = Image.open(image_path).convert("L").resize((128, 72))
         arr = np.asarray(gray, dtype=np.float32)
         std_val = float(np.std(arr))
-        grad_x = float(np.mean(np.abs(np.diff(arr, axis=1))))
-        grad_y = float(np.mean(np.abs(np.diff(arr, axis=0))))
-        edge_energy = grad_x + grad_y
-        return std_val >= 14.0 and edge_energy >= 3.5
+        gx = np.abs(np.diff(arr, axis=1))
+        gy = np.abs(np.diff(arr, axis=0))
+        edge_energy = float(np.mean(gx) + np.mean(gy))
+        # Reject images where most pixels are flat/smooth (e.g. blank sky)
+        active_ratio = float(np.mean(gx[:, :-1] + gy[:-1, :] > 3.0))
+        return std_val >= 16.0 and edge_energy >= 4.2 and active_ratio >= 0.28
     except Exception:
         return False
 

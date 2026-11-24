@@ -385,10 +385,10 @@ _DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789
 def _extract_stat_target(ch: dict) -> tuple[int, str]:
     """Extract numeric target and suffix from highlight_stat or marathi_narration."""
     explicit_val = ch.get("target_value")
-    explicit_suffix = ch.get("suffix")
+    explicit_suffix = ch.get("suffix") if ch.get("suffix") is not None else ch.get("unit")
     if explicit_val is not None:
         try:
-            return int(float(explicit_val)), str(explicit_suffix or "%")
+            return int(float(explicit_val)), str(explicit_suffix or "")
         except (TypeError, ValueError):
             pass
 
@@ -405,11 +405,14 @@ def _extract_stat_target(ch: dict) -> tuple[int, str]:
         pct_match = re.search(r"(\d{1,4})\s*%", normalized)
         if pct_match:
             return int(pct_match.group(1)), "%"
-        num_match = re.search(r"\b(\d{1,4})\b", normalized)
+        plus_match = re.search(r"(\d{1,5})\s*\+", normalized)
+        if plus_match:
+            return int(plus_match.group(1)), "+"
+        num_match = re.search(r"\b(\d{1,5})\b", normalized)
         if num_match:
-            return int(num_match.group(1)), str(explicit_suffix or "%")
+            return int(num_match.group(1)), str(explicit_suffix or "")
 
-    return 100, str(explicit_suffix or "%")
+    return 100, str(explicit_suffix if explicit_suffix is not None else "%")
 
 
 def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
