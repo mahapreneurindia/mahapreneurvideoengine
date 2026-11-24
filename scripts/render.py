@@ -415,7 +415,16 @@ def _extract_stat_target(ch: dict) -> tuple[int, str]:
 def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
     """Build a valid vector_graphic spec dict from an explicit graphic_type string."""
     gtype = graphic_type.strip().lower()
-    if gtype not in ("checklist", "comparison", "stat_counter", "process_steps"):
+    supported = (
+        "checklist",
+        "comparison",
+        "stat_counter",
+        "process_steps",
+        "whiteboard",
+        "stick_diagram",
+        "blueprint",
+    )
+    if gtype not in supported:
         return None
 
     scene = str(ch.get("scene") or ch.get("title") or "").strip()
@@ -449,8 +458,33 @@ def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
             "type": "stat_counter",
             "target_value": target_val,
             "suffix": suffix,
-            "subtitle": scene or "शुद्ध आणि नैसर्गिक हमी",
+            "subtitle": str(ch.get("subtitle") or scene or "शुद्ध आणि नैसर्गिक हमी"),
         }
+
+    if gtype == "whiteboard":
+        items = ch.get("items") or ch.get("steps") or ch.get("nodes")
+        if not isinstance(items, list) or not items:
+            parts = [p.strip() for p in re.split(r"[।\n]+", narration) if p.strip()][:3]
+            items = parts or ["संकल्पना", "प्रक्रिया", "परिणाम"]
+        return {"type": "whiteboard", "title": scene or "मुख्य आराखडा", "items": items}
+
+    if gtype == "stick_diagram":
+        figures = ch.get("figures")
+        items = ch.get("items") or ch.get("steps") or ch.get("nodes")
+        spec: dict = {"type": "stick_diagram", "title": scene or "कृती आराखडा"}
+        if isinstance(figures, list) and figures:
+            spec["figures"] = figures
+        elif isinstance(items, list) and items:
+            spec["items"] = items
+        else:
+            spec["items"] = ["शेतकरी निवड", "शुद्ध तपासणी"]
+        return spec
+
+    if gtype == "blueprint":
+        nodes = ch.get("nodes") or ch.get("steps") or ch.get("items")
+        if not isinstance(nodes, list) or not nodes:
+            nodes = ["घटक १", "प्रक्रिया २", "तपासणी ३", "अंतिम ४"]
+        return {"type": "blueprint", "title": scene or "तांत्रिक आराखडा", "nodes": nodes}
 
     steps = ch.get("steps")
     if not isinstance(steps, list) or not steps:
