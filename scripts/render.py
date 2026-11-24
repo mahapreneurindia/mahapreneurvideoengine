@@ -161,6 +161,24 @@ def wrap_text(
     return lines
 
 
+def format_map_location(raw_map) -> str | None:
+    """Normalize a map_location string or dict into a clean display string."""
+    if not raw_map:
+        return None
+    if isinstance(raw_map, dict):
+        loc = (
+            raw_map.get("location_name")
+            or raw_map.get("place")
+            or raw_map.get("search_query")
+            or raw_map.get("name")
+            or ""
+        )
+        text = str(loc).strip()
+        return text or None
+    text = str(raw_map).strip()
+    return text or None
+
+
 def fetch_chapter_image(
     index: int,
     wiki_query: str,
@@ -168,9 +186,17 @@ def fetch_chapter_image(
     scene_title: str,
     video_title: str,
 ) -> skia.Image | None:
-    """Try primary wiki_image_search then fallback queries derived from scene/title."""
+    """Try primary wiki_image_search then domain-relevant fallback queries."""
     candidates: list[str] = []
-    for raw_q in (wiki_query, map_location, scene_title, video_title):
+    for raw_q in (
+        wiki_query,
+        format_map_location(map_location),
+        scene_title,
+        video_title,
+        "Maharashtra agriculture farm",
+        "dairy farming India",
+        "Indian farmer agriculture",
+    ):
         if isinstance(raw_q, str):
             q = raw_q.strip()
             if q and q not in candidates:
@@ -301,16 +327,24 @@ def render_chapter_clip(
             canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), scrim_paint)
 
             # Optional map location badge with geometric pin icon
-            if map_location and str(map_location).strip():
-                loc_text = str(map_location).strip()
+            loc_text = format_map_location(map_location)
+            if loc_text:
                 badge_w = measure_shaped_width(loc_text, badge_font, hb_font, upem)
                 pill_rect = skia.RRect.MakeRectXY(
                     skia.Rect.MakeXYWH(72, 64, badge_w + 84, 58), 29, 29
                 )
                 pill_paint = skia.Paint(
-                    Color=skia.ColorSetARGB(205, 15, 23, 42), AntiAlias=True
+                    Color=skia.ColorSetARGB(210, 15, 23, 42), AntiAlias=True
                 )
                 canvas.drawRRect(pill_rect, pill_paint)
+
+                pill_border = skia.Paint(
+                    Color=skia.ColorSetARGB(90, 255, 255, 255),
+                    Style=skia.Paint.kStroke_Style,
+                    StrokeWidth=2.0,
+                    AntiAlias=True,
+                )
+                canvas.drawRRect(pill_rect, pill_border)
 
                 pin_paint = skia.Paint(
                     Color=skia.ColorSetRGB(239, 68, 68), AntiAlias=True
@@ -324,12 +358,39 @@ def render_chapter_clip(
                     canvas, loc_text, 128, 104, badge_font, badge_paint, hb_font, upem
                 )
 
-            # Centered Marathi scene title near the lower third
+            # Rounded card container with comfortable margins around the Marathi scene title
             text_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
             line_height = 84
-            start_y = HEIGHT - 120 - (len(title_lines) - 1) * line_height
+            line_widths = [
+                measure_shaped_width(line, title_font, hb_font, upem)
+                for line in title_lines
+            ]
+            max_line_w = max(line_widths) if line_widths else 0.0
+            card_pad_x = 56.0
+            card_pad_y = 32.0
+            card_w = min(WIDTH - 120.0, max_line_w + card_pad_x * 2)
+            card_h = len(title_lines) * line_height + card_pad_y * 2
+            card_x = (WIDTH - card_w) / 2.0
+            card_y = HEIGHT - 72.0 - card_h
+
+            card_rect = skia.RRect.MakeRectXY(
+                skia.Rect.MakeXYWH(card_x, card_y, card_w, card_h), 24, 24
+            )
+            card_bg = skia.Paint(
+                Color=skia.ColorSetARGB(195, 15, 23, 42), AntiAlias=True
+            )
+            canvas.drawRRect(card_rect, card_bg)
+            card_border = skia.Paint(
+                Color=skia.ColorSetARGB(80, 255, 255, 255),
+                Style=skia.Paint.kStroke_Style,
+                StrokeWidth=2.0,
+                AntiAlias=True,
+            )
+            canvas.drawRRect(card_rect, card_border)
+
+            start_y = card_y + card_pad_y + 62.0
             for line_idx, line in enumerate(title_lines):
-                line_w = measure_shaped_width(line, title_font, hb_font, upem)
+                line_w = line_widths[line_idx]
                 x = (WIDTH - line_w) / 2.0
                 y = start_y + line_idx * line_height
                 draw_shaped_text(

@@ -78,37 +78,74 @@ def synthesize_marathi_tts(
     model = os.environ.get("SARVAM_MODEL", DEFAULT_SARVAM_MODEL).strip() or DEFAULT_SARVAM_MODEL
 
     if key:
-        payload = {
-            "inputs": [text.strip()],
-            "target_language_code": lang_code,
-            "speaker": speaker,
-            "pitch": 0,
-            "pace": 1.0,
-            "loudness": 1.5,
-            "speech_sample_rate": 22050,
-            "enable_preprocessing": True,
-            "model": model,
-        }
+        cleaned = text.strip()
+        chunks: list[str] = []
+        if len(cleaned) <= 450:
+            chunks = [cleaned]
+        else:
+            import re
+            sentences = [s.strip() for s in re.split(r"(?<=[।.!?])\s+", cleaned) if s.strip()]
+            buf = ""
+            for sent in sentences:
+                if len(buf) + len(sent) + 1 <= 450:
+                    buf = f"{buf} {sent}".strip()
+                else:
+                    if buf:
+                        chunks.append(buf)
+                    buf = sent[:450]
+            if buf:
+                chunks.append(buf)
+
         headers = {"api-subscription-key": key, "Content-Type": "application/json"}
-        print(
-            f"Requesting Sarvam TTS for {label} "
-            f"(model={model}, speaker={speaker}, chars={len(text.strip())})..."
-        )
-        try:
-            response = requests.post(SARVAM_TTS_URL, json=payload, headers=headers, timeout=30)
-            print(f"Sarvam TTS {label} HTTP status: {response.status_code}")
-            if response.status_code == 200:
-                audios = response.json().get("audios") or []
-                if audios:
-                    with open(output_path, "wb") as fh:
-                        fh.write(base64.b64decode(audios[0]))
-                    print(f"Generated Sarvam TTS for {label} -> {output_path}")
-                    return output_path
-                print(f"Sarvam API 200 response missing 'audios': {response.text}")
-            else:
-                print(f"Sarvam API error ({response.status_code}) for {label}: {response.text}")
-        except Exception as exc:
-            print(f"Sarvam TTS request failed for {label}: {exc}")
+        chunk_paths: list[str] = []
+        all_ok = True
+        for idx, chunk in enumerate(chunks):
+            chunk_path = output_path if len(chunks) == 1 else f"{output_path}.part{idx}.wav"
+            payload = {
+                "inputs": [chunk],
+                "target_language_code": lang_code,
+                "speaker": speaker,
+                "pitch": 0,
+                "pace": 1.0,
+                "loudness": 1.5,
+                "speech_sample_rate": 22050,
+                "enable_preprocessing": True,
+                "model": model,
+            }
+            print(
+                f"Requesting Sarvam TTS for {label} part {idx + 1}/{len(chunks)} "
+                f"(model={model}, speaker={speaker}, chars={len(chunk)})..."
+            )
+            try:
+                response = requests.post(SARVAM_TTS_URL, json=payload, headers=headers, timeout=30)
+                print(f"Sarvam TTS {label} HTTP status: {response.status_code}")
+                if response.status_code == 200:
+                    audios = response.json().get("audios") or []
+                    if audios:
+                        with open(chunk_path, "wb") as fh:
+                            fh.write(base64.b64decode(audios[0]))
+                        chunk_paths.append(chunk_path)
+                        continue
+                    print(f"Sarvam API 200 response missing 'audios': {response.text}")
+                else:
+                    print(f"Sarvam API error ({response.status_code}) for {label}: {response.text}")
+            except Exception as exc:
+                print(f"Sarvam TTS request failed for {label}: {exc}")
+            all_ok = False
+            break
+
+        if all_ok and chunk_paths:
+            if len(chunk_paths) > 1:
+                list_file = f"{output_path}.parts.txt"
+                with open(list_file, "w", encoding="utf-8") as lf:
+                    for cp in chunk_paths:
+                        lf.write(f"file '{os.path.abspath(cp)}'\n")
+                subprocess.run(
+                    ["ffmpeg", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", "-y", output_path],
+                    check=True,
+                )
+            print(f"Generated Sarvam TTS for {label} -> {output_path}")
+            return output_path
     else:
         print(f"WARNING: SARVAM_API_KEY is missing for {label}; trying edge-tts fallback.")
 
