@@ -1,19 +1,43 @@
 import math
+import unicodedata
 import skia
 
 from make_map import _draw_label, _get_font_resources, _measure_label
+
+
+def _strip_trailing_combining(text: str) -> str:
+    """Avoid leaving dangling Devanagari halant/ZWJ/combining marks when truncating."""
+    while text and (
+        text[-1] in ("\u094d", "\u200d", "\u200c")
+        or unicodedata.category(text[-1]).startswith("M")
+    ):
+        text = text[:-1]
+    return text.rstrip()
 
 
 def _truncate_line_to_width(
     text: str, font: skia.Font, max_width: float, hb_font, upem: int
 ) -> str:
     """Truncate text with ellipsis so its shaped width never exceeds max_width."""
+    text = unicodedata.normalize("NFC", text)
     if _measure_label(text, font, hb_font, upem) <= max_width:
         return text
     ellipsis = "…"
+    words = text.split()
+    if len(words) > 1:
+        kept: list[str] = []
+        for w in words:
+            cand = " ".join(kept + [w])
+            if _measure_label(cand + ellipsis, font, hb_font, upem) <= max_width:
+                kept.append(w)
+            else:
+                break
+        if kept:
+            return " ".join(kept) + ellipsis
+
     trimmed = text.rstrip()
     while trimmed and _measure_label(trimmed + ellipsis, font, hb_font, upem) > max_width:
-        trimmed = trimmed[:-1]
+        trimmed = _strip_trailing_combining(trimmed[:-1])
     return (trimmed + ellipsis) if trimmed else ellipsis
 
 
@@ -48,7 +72,7 @@ def _fit_text_lines(
     upem: int,
 ) -> tuple[skia.Font, list[str]]:
     """Step down font size until wrapped lines fit within max_width and max_lines."""
-    cleaned = " ".join((text or "").split())
+    cleaned = unicodedata.normalize("NFC", " ".join((text or "").split()))
     if not cleaned:
         return skia.Font(typeface, base_size), []
 
@@ -538,82 +562,138 @@ def _draw_whiteboard(
     n = len(items)
     pad_x = 32.0
     gap = 24.0
-    avail_w = rect.width() - pad_x * 2 - gap * max(0, n - 1)
-    box_w = avail_w / n
-    box_h = min(190.0, max(120.0, rect.bottom() - y_top - 42.0))
-    box_y = y_top + (rect.bottom() - y_top - box_h) * 0.45
+    list_w = max(200.0, (rect.width() - pad_x * 2 - gap) * 0.65)
+    sketch_w = max(120.0, rect.width() - pad_x * 2 - gap - list_w)
+    list_h = max(120.0, rect.bottom() - y_top - 26.0)
+    list_rect = skia.Rect.MakeXYWH(rect.left() + pad_x, y_top, list_w, list_h)
+    list_rrect = skia.RRect.MakeRectXY(list_rect, 14, 14)
+
+    # Left sketched bullet container (strictly clipped to bounds)
+    canvas.drawRRect(
+        list_rrect,
+        skia.Paint(Color=skia.ColorSetRGB(255, 255, 255), AntiAlias=True),
+    )
+    canvas.drawRRect(
+        list_rrect,
+        skia.Paint(
+            Color=skia.ColorSetRGB(17, 24, 39),
+            Style=skia.Paint.kStroke_Style,
+            StrokeWidth=2.5,
+            AntiAlias=True,
+        ),
+    )
+
+    canvas.save()
+    canvas.clipRRect(list_rrect, doAntiAlias=True)
+    row_h = list_h / n
+    text_max_w = max(80.0, list_w - 72.0)
 
     for idx, label in enumerate(items):
-        start_t = idx * (0.7 / max(1, n))
-        local = max(0.0, min(1.0, (t - start_t) / 0.3))
+        start_t = idx * (0.65 / max(1, n))
+        local = max(0.0, min(1.0, (t - start_t) / 0.32))
         eased = 1.0 - (1.0 - local) ** 3
         if eased <= 0.0:
             continue
         alpha = int(255 * eased)
-        bx = rect.left() + pad_x + idx * (box_w + gap)
-        by = box_y + (1.0 - eased) * 16.0
-        box_rect = skia.RRect.MakeRectXY(skia.Rect.MakeXYWH(bx, by, box_w, box_h), 14, 14)
+        slide_x = (1.0 - eased) * 20.0
+        row_top = list_rect.top() + idx * row_h
+        cy = row_top + row_h * 0.5
 
-        canvas.drawRRect(
-            box_rect,
-            skia.Paint(Color=skia.ColorSetARGB(alpha, 255, 255, 255), AntiAlias=True),
-        )
-        canvas.drawRRect(
-            box_rect,
-            skia.Paint(
-                Color=skia.ColorSetARGB(alpha, 17, 24, 39),
-                Style=skia.Paint.kStroke_Style,
-                StrokeWidth=2.5,
-                AntiAlias=True,
-            ),
-        )
+        if idx > 0:
+            canvas.drawLine(
+                list_rect.left() + 18.0,
+                row_top,
+                list_rect.right() - 18.0,
+                row_top,
+                skia.Paint(Color=skia.ColorSetARGB(40, 17, 24, 39), StrokeWidth=1.5, AntiAlias=True),
+            )
+
+        bx = list_rect.left() + 28.0 + slide_x
         canvas.drawCircle(
-            bx + 22.0,
-            by + 24.0,
-            9.0,
+            bx,
+            cy,
+            8.0,
             skia.Paint(Color=skia.ColorSetARGB(alpha, 217, 119, 6), AntiAlias=True),
         )
 
         i_font, i_lines = _fit_text_lines(
-            label, typeface, 22.0, 15.0, box_w - 28.0, 3, hb_font, upem
+            label, typeface, 22.0, 15.0, text_max_w, 2, hb_font, upem
         )
-        line_h = i_font.getSize() + 5.0
-        text_block_h = len(i_lines) * line_h
-        text_start_y = by + 44.0 + max(0.0, (box_h - 52.0 - text_block_h) * 0.5) + i_font.getSize() * 0.85
+        line_h = i_font.getSize() + 4.0
+        first_y = cy + (7.0 if len(i_lines) == 1 else -3.0)
         for li, line in enumerate(i_lines):
-            lw = _measure_label(line, i_font, hb_font, upem)
-            lx = bx + (box_w - lw) * 0.5
             _draw_label(
                 canvas,
                 line,
-                lx,
-                text_start_y + li * line_h,
+                bx + 22.0,
+                first_y + li * line_h,
                 i_font,
                 skia.Paint(Color=skia.ColorSetARGB(alpha, 17, 24, 39), AntiAlias=True),
                 hb_font,
                 upem,
             )
+    canvas.restore()
 
-        if idx < n - 1:
-            arrow_t = max(0.0, min(1.0, (t - (start_t + 0.15)) / 0.2))
-            if arrow_t > 0.0:
-                ax1 = bx + box_w + 4.0
-                ax2 = ax1 + (gap - 8.0) * arrow_t
-                ay = by + box_h * 0.5
-                apaint = skia.Paint(
-                    Color=skia.ColorSetRGB(217, 119, 6),
-                    Style=skia.Paint.kStroke_Style,
-                    StrokeWidth=3.0,
-                    StrokeCap=skia.Paint.kRound_Cap,
-                    AntiAlias=True,
-                )
-                canvas.drawLine(ax1, ay, ax2, ay, apaint)
-                if arrow_t > 0.75:
-                    head = skia.Path()
-                    head.moveTo(ax2 - 7.0, ay - 6.0)
-                    head.lineTo(ax2, ay)
-                    head.lineTo(ax2 - 7.0, ay + 6.0)
-                    canvas.drawPath(head, apaint)
+    # Right hand-drawn sketch element (clipboard/note + check + curved arrow)
+    sketch_t = max(0.0, min(1.0, (t - 0.15) / 0.65))
+    sketch_eased = 1.0 - (1.0 - sketch_t) ** 3
+    if sketch_eased > 0.0:
+        sx = list_rect.right() + gap
+        sy = y_top + 8.0
+        sh = max(100.0, list_h - 16.0)
+        s_alpha = int(255 * sketch_eased)
+        ink = skia.Paint(
+            Color=skia.ColorSetARGB(s_alpha, 17, 24, 39),
+            Style=skia.Paint.kStroke_Style,
+            StrokeWidth=2.5,
+            StrokeCap=skia.Paint.kRound_Cap,
+            StrokeJoin=skia.Paint.kRound_Join,
+            AntiAlias=True,
+        )
+        card_box = skia.RRect.MakeRectXY(
+            skia.Rect.MakeXYWH(sx + 10.0, sy + 16.0, sketch_w - 20.0, sh - 24.0), 14, 14
+        )
+        canvas.drawRRect(
+            card_box,
+            skia.Paint(Color=skia.ColorSetARGB(s_alpha, 254, 243, 199), AntiAlias=True),
+        )
+        canvas.drawRRect(card_box, ink)
+
+        # Sketched clipboard clip at top
+        clip_r = skia.RRect.MakeRectXY(
+            skia.Rect.MakeXYWH(sx + sketch_w * 0.5 - 26.0, sy + 6.0, 52.0, 20.0), 8, 8
+        )
+        canvas.drawRRect(
+            clip_r,
+            skia.Paint(Color=skia.ColorSetARGB(s_alpha, 217, 119, 6), AntiAlias=True),
+        )
+
+        # Sketched checkmark + lines inside note
+        cx_s = sx + sketch_w * 0.5
+        cy_s = sy + sh * 0.44
+        _draw_check_icon(canvas, cx_s, cy_s, 22.0, s_alpha)
+        for line_i in range(2):
+            ly = cy_s + 40.0 + line_i * 18.0
+            lw_s = (sketch_w - 64.0) * (0.85 - line_i * 0.25) * sketch_eased
+            canvas.drawLine(cx_s - lw_s * 0.5, ly, cx_s + lw_s * 0.5, ly, ink)
+
+        # Curved connector arrow from bullet card to sketch card
+        arrow_path = skia.Path()
+        ax1 = list_rect.right() - 4.0
+        ay1 = y_top + list_h * 0.5
+        ax2 = sx + 8.0
+        arrow_path.moveTo(ax1, ay1)
+        arrow_path.quadTo((ax1 + ax2) * 0.5, ay1 - 18.0, ax2, ay1)
+        canvas.drawPath(
+            arrow_path,
+            skia.Paint(
+                Color=skia.ColorSetARGB(s_alpha, 217, 119, 6),
+                Style=skia.Paint.kStroke_Style,
+                StrokeWidth=3.0,
+                StrokeCap=skia.Paint.kRound_Cap,
+                AntiAlias=True,
+            ),
+        )
 
 
 def _draw_stick_figure(

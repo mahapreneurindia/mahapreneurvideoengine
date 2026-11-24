@@ -5,6 +5,7 @@ import os
 import re
 import subprocess
 import sys
+import unicodedata
 import urllib.request
 
 import numpy as np
@@ -197,6 +198,7 @@ def shape_text(
     """Shape Devanagari/Marathi text with uharfbuzz into a Skia TextBlob."""
     if not text:
         return None, 0.0
+    text = unicodedata.normalize("NFC", text)
     if hb is not None and hb_font is not None:
         try:
             buf = hb.Buffer()
@@ -467,8 +469,12 @@ def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
     if gtype == "whiteboard":
         items = ch.get("items") or ch.get("steps") or ch.get("nodes")
         if not isinstance(items, list) or not items:
-            parts = [p.strip() for p in re.split(r"[।\n]+", narration) if p.strip()][:3]
-            items = parts or ["संकल्पना", "प्रक्रिया", "परिणाम"]
+            raw_parts = [p.strip() for p in re.split(r"[।,\n]+", narration) if p.strip()]
+            concise: list[str] = []
+            for part in raw_parts[:4]:
+                words = part.split()
+                concise.append(" ".join(words[:5]))
+            items = concise or ["संकल्पना", "प्रक्रिया", "परिणाम"]
         return {"type": "whiteboard", "title": scene or "मुख्य आराखडा", "items": items}
 
     if gtype == "stick_diagram":

@@ -1,6 +1,7 @@
 import json
 import math
 import os
+import unicodedata
 
 import skia
 
@@ -79,6 +80,7 @@ def _draw_label(
     upem: int,
 ) -> None:
     if hb is not None and hb_font is not None and text:
+        text = unicodedata.normalize("NFC", text)
         try:
             buf = hb.Buffer()
             buf.add_str(text)
@@ -111,6 +113,7 @@ def _draw_label(
 
 def _measure_label(text: str, font: skia.Font, hb_font, upem: int) -> float:
     if hb is not None and hb_font is not None and text:
+        text = unicodedata.normalize("NFC", text)
         try:
             buf = hb.Buffer()
             buf.add_str(text)
