@@ -224,6 +224,62 @@ def _draw_comparison(
     left_items = [str(x).strip() for x in (spec.get("left_items") or []) if str(x).strip()][:4]
     right_items = [str(x).strip() for x in (spec.get("right_items") or []) if str(x).strip()][:4]
 
+    if rect.width() < 560.0:
+        # Stack left and right sections vertically on narrow/portrait cards
+        half_h = (rect.height() - 56.0) * 0.5
+        mid_y = rect.top() + 28.0 + half_h
+        canvas.drawLine(
+            rect.left() + 28.0,
+            mid_y,
+            rect.right() - 28.0,
+            mid_y,
+            skia.Paint(Color=skia.ColorSetARGB(80, 148, 163, 184), StrokeWidth=2.0, AntiAlias=True),
+        )
+        col_w = rect.width() - 56.0
+        left_t = max(0.0, min(1.0, t / 0.45))
+        left_alpha = int(255 * (1.0 - (1.0 - left_t) ** 3))
+        if left_alpha > 0:
+            lh_font, lh_lines = _fit_text_lines(
+                left_title, typeface, 24.0, 17.0, col_w, 1, hb_font, upem
+            )
+            if lh_lines:
+                _draw_label(
+                    canvas, lh_lines[0], rect.left() + 28.0, rect.top() + 44.0,
+                    lh_font, skia.Paint(Color=skia.ColorSetARGB(left_alpha, 248, 113, 113), AntiAlias=True), hb_font, upem,
+                )
+            row_h = min(48.0, max(32.0, (half_h - 52.0) / max(1, len(left_items))))
+            for idx, item in enumerate(left_items[:3]):
+                cy = rect.top() + 78.0 + idx * row_h
+                _draw_cross_icon(canvas, rect.left() + 42.0, cy, 10.0, left_alpha)
+                li_font, li_lines = _fit_text_lines(item, typeface, 20.0, 15.0, col_w - 40.0, 1, hb_font, upem)
+                if li_lines:
+                    _draw_label(
+                        canvas, li_lines[0], rect.left() + 64.0, cy + 6.0,
+                        li_font, skia.Paint(Color=skia.ColorSetARGB(left_alpha, 226, 232, 240), AntiAlias=True), hb_font, upem,
+                    )
+        right_t = max(0.0, min(1.0, (t - 0.45) / 0.45))
+        right_alpha = int(255 * (1.0 - (1.0 - right_t) ** 3))
+        if right_alpha > 0:
+            rh_font, rh_lines = _fit_text_lines(
+                right_title, typeface, 24.0, 17.0, col_w, 1, hb_font, upem
+            )
+            if rh_lines:
+                _draw_label(
+                    canvas, rh_lines[0], rect.left() + 28.0, mid_y + 34.0,
+                    rh_font, skia.Paint(Color=skia.ColorSetARGB(right_alpha, 74, 222, 128), AntiAlias=True), hb_font, upem,
+                )
+            row_h = min(48.0, max(32.0, (half_h - 52.0) / max(1, len(right_items))))
+            for idx, item in enumerate(right_items[:3]):
+                cy = mid_y + 68.0 + idx * row_h
+                _draw_check_icon(canvas, rect.left() + 42.0, cy, 10.0, right_alpha)
+                ri_font, ri_lines = _fit_text_lines(item, typeface, 20.0, 15.0, col_w - 40.0, 1, hb_font, upem)
+                if ri_lines:
+                    _draw_label(
+                        canvas, ri_lines[0], rect.left() + 64.0, cy + 6.0,
+                        ri_font, skia.Paint(Color=skia.ColorSetARGB(right_alpha, 248, 250, 252), AntiAlias=True), hb_font, upem,
+                    )
+        return
+
     mid_x = rect.left() + rect.width() * 0.5
     col_w = rect.width() * 0.5 - 48.0
 
@@ -561,10 +617,16 @@ def _draw_whiteboard(
 
     n = len(items)
     pad_x = 32.0
-    gap = 24.0
-    list_w = max(200.0, (rect.width() - pad_x * 2 - gap) * 0.65)
-    sketch_w = max(120.0, rect.width() - pad_x * 2 - gap - list_w)
-    list_h = max(120.0, rect.bottom() - y_top - 26.0)
+    gap = 20.0
+    is_narrow = rect.width() < 640.0
+    if is_narrow:
+        list_w = rect.width() - pad_x * 2
+        list_h = max(110.0, (rect.bottom() - y_top - 24.0) * 0.64)
+        sketch_w = list_w
+    else:
+        list_w = max(200.0, (rect.width() - pad_x * 2 - gap) * 0.65)
+        sketch_w = max(120.0, rect.width() - pad_x * 2 - gap - list_w)
+        list_h = max(120.0, rect.bottom() - y_top - 26.0)
     list_rect = skia.Rect.MakeXYWH(rect.left() + pad_x, y_top, list_w, list_h)
     list_rrect = skia.RRect.MakeRectXY(list_rect, 14, 14)
 
@@ -634,10 +696,10 @@ def _draw_whiteboard(
             )
     canvas.restore()
 
-    # Right hand-drawn sketch element (clipboard/note + check + curved arrow)
+    # Right (or bottom when narrow) hand-drawn sketch element
     sketch_t = max(0.0, min(1.0, (t - 0.15) / 0.65))
     sketch_eased = 1.0 - (1.0 - sketch_t) ** 3
-    if sketch_eased > 0.0:
+    if sketch_eased > 0.0 and not is_narrow:
         sx = list_rect.right() + gap
         sy = y_top + 8.0
         sh = max(100.0, list_h - 16.0)
@@ -930,6 +992,34 @@ def _draw_blueprint(
 
     n = len(nodes)
     pad_x = 34.0
+    if rect.width() < 620.0 and n >= 3:
+        # 2x2 grid for narrow/portrait cards
+        cols = 2
+        rows = (n + 1) // 2
+        gap_x, gap_y = 18.0, 18.0
+        box_w = (rect.width() - pad_x * 2 - gap_x) / cols
+        box_h = min(130.0, max(72.0, (rect.bottom() - y_top - 36.0 - gap_y * (rows - 1)) / rows))
+        for idx, label in enumerate(nodes):
+            start_t = idx * (0.65 / max(1, n))
+            local = max(0.0, min(1.0, (t - start_t) / 0.3))
+            eased = 1.0 - (1.0 - local) ** 3
+            if eased <= 0.0:
+                continue
+            alpha = int(255 * eased)
+            r_i, c_i = divmod(idx, 2)
+            bx = rect.left() + pad_x + c_i * (box_w + gap_x)
+            by = y_top + r_i * (box_h + gap_y)
+            b_rect = skia.Rect.MakeXYWH(bx, by, box_w, box_h)
+            canvas.drawRect(b_rect, skia.Paint(Color=skia.ColorSetARGB(int(90 * eased), 14, 116, 144), AntiAlias=True))
+            canvas.drawRect(b_rect, skia.Paint(Color=skia.ColorSetARGB(alpha, 56, 189, 248), Style=skia.Paint.kStroke_Style, StrokeWidth=2.0, AntiAlias=True))
+            n_font, n_lines = _fit_text_lines(label, typeface, 20.0, 14.0, box_w - 20.0, 2, hb_font, upem)
+            line_h = n_font.getSize() + 4.0
+            text_start_y = by + max(12.0, (box_h - len(n_lines) * line_h) * 0.5) + n_font.getSize() * 0.85
+            for li, line in enumerate(n_lines):
+                lw = _measure_label(line, n_font, hb_font, upem)
+                _draw_label(canvas, line, bx + (box_w - lw) * 0.5, text_start_y + li * line_h, n_font, skia.Paint(Color=skia.ColorSetARGB(alpha, 224, 242, 254), AntiAlias=True), hb_font, upem)
+        return
+
     gap = 22.0
     box_w = (rect.width() - pad_x * 2 - gap * max(0, n - 1)) / n
     box_h = min(165.0, max(105.0, rect.bottom() - y_top - 48.0))

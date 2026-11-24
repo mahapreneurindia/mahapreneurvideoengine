@@ -903,32 +903,43 @@ def split_caption_chunks(
     return chunks
 
 
+def resolve_canvas_dimensions(aspect_ratio: str | None) -> tuple[str, int, int]:
+    """Return (normalized_aspect_ratio, width, height) for 16:9 or 9:16."""
+    ar = str(aspect_ratio or "16:9").strip()
+    if ar == "9:16":
+        return "9:16", 1080, 1920
+    return "16:9", 1920, 1080
+
+
 def layout_chapter_cards(
     timeline_items: list[dict],
     title_font: skia.Font,
     caption_font: skia.Font,
     hb_font,
     upem: int,
+    canvas_w: int = WIDTH,
+    canvas_h: int = HEIGHT,
 ) -> list[dict]:
     """Arrange chapter cards on a 2D virtual world canvas with spacing and tilt."""
-    card_w = 1600.0
-    card_h = 900.0
-    col_step = 2050.0
-    row_step = 1320.0
+    is_portrait = canvas_h > canvas_w
+    card_w = 940.0 if is_portrait else 1600.0
+    card_h = 1660.0 if is_portrait else 900.0
+    col_step = 1320.0 if is_portrait else 2050.0
+    row_step = 2050.0 if is_portrait else 1320.0
     rotations = [-1.8, 1.4, -1.2, 1.6, -1.5, 1.2]
 
     cards: list[dict] = []
     for idx, item in enumerate(timeline_items):
         row = idx // 2
         col = idx % 2 if row % 2 == 0 else (1 - (idx % 2))
-        jitter_x = 120.0 if idx % 3 == 1 else (-80.0 if idx % 3 == 2 else 0.0)
-        jitter_y = 90.0 if idx % 2 == 1 else -60.0
+        jitter_x = 90.0 if idx % 3 == 1 else (-60.0 if idx % 3 == 2 else 0.0)
+        jitter_y = 70.0 if idx % 2 == 1 else -50.0
         cx = 1100.0 + col * col_step + jitter_x
-        cy = 750.0 + row * row_step + jitter_y
+        cy = 1000.0 + row * row_step + jitter_y
         angle = rotations[idx % len(rotations)]
-        title_lines = wrap_text(item["scene"], title_font, card_w - 180.0, hb_font, upem)
+        title_lines = wrap_text(item["scene"], title_font, card_w - 140.0, hb_font, upem)
         caption_chunks = split_caption_chunks(
-            item.get("narration", ""), caption_font, card_w - 160.0, hb_font, upem
+            item.get("narration", ""), caption_font, card_w - 120.0, hb_font, upem
         )
 
         cards.append(
@@ -954,10 +965,12 @@ def draw_world_background(
     cam_zoom: float,
     theme: dict,
     cards: list[dict],
+    canvas_w: int = WIDTH,
+    canvas_h: int = HEIGHT,
 ) -> None:
     """Draw themed 2D board backdrop, subtle grid, and connector path between cards."""
-    half_w = (WIDTH / 2.0) / max(0.2, cam_zoom) + 400.0
-    half_h = (HEIGHT / 2.0) / max(0.2, cam_zoom) + 400.0
+    half_w = (canvas_w / 2.0) / max(0.2, cam_zoom) + 400.0
+    half_h = (canvas_h / 2.0) / max(0.2, cam_zoom) + 400.0
     left = cam_x - half_w
     top = cam_y - half_h
     right = cam_x + half_w
@@ -1053,7 +1066,67 @@ def draw_chapter_card(
     vg_progress = min(1.0, max(0.0, elapsed_sec / anim_window)) if is_active else 1.0
     map_progress = min(1.0, max(0.0, elapsed_sec / 1.5)) if is_active else 1.0
 
-    if has_vg and has_map and loc_text:
+    if h > w:
+        # Vertical 9:16 portrait layout: stack visual elements cleanly without horizontal cramping
+        inner_w = w - 84.0
+        visual_top = -half_h + 168.0
+        if has_vg and has_map and loc_text:
+            draw_vector_graphic(
+                canvas,
+                skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top, inner_w, h * 0.30),
+                vg_spec,
+                vg_progress,
+                font_path,
+            )
+            draw_map_card(
+                canvas,
+                skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + h * 0.32, inner_w, h * 0.25),
+                loc_text,
+                map_progress,
+                font_path,
+            )
+        elif skia_img is not None and (has_map or has_vg):
+            img_w, img_h = skia_img.width(), skia_img.height()
+            photo_h = h * 0.28
+            scale = min(inner_w / img_w, photo_h / img_h) * (1.0 + (0.04 * local_progress if is_active else 0.0))
+            drawn_w, drawn_h = img_w * scale, img_h * scale
+            canvas.save()
+            canvas.translate(-drawn_w / 2.0, visual_top + (photo_h - drawn_h) / 2.0)
+            canvas.scale(scale, scale)
+            canvas.drawImage(skia_img, 0, 0, skia.SamplingOptions(skia.FilterMode.kLinear))
+            canvas.restore()
+            second_rect = skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + photo_h + 24.0, inner_w, h * 0.27)
+            if has_map and loc_text:
+                draw_map_card(canvas, second_rect, loc_text, map_progress, font_path)
+            elif has_vg and vg_spec is not None:
+                draw_vector_graphic(canvas, second_rect, vg_spec, vg_progress, font_path)
+        elif has_vg and vg_spec is not None:
+            draw_vector_graphic(
+                canvas,
+                skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + 40.0, inner_w, h * 0.44),
+                vg_spec,
+                vg_progress,
+                font_path,
+            )
+        elif has_map and loc_text:
+            draw_map_card(
+                canvas,
+                skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + 40.0, inner_w, h * 0.44),
+                loc_text,
+                map_progress,
+                font_path,
+            )
+        elif skia_img is not None:
+            img_w, img_h = skia_img.width(), skia_img.height()
+            photo_h = h * 0.46
+            scale = min(inner_w / img_w, photo_h / img_h) * (1.0 + (0.04 * local_progress if is_active else 0.0))
+            drawn_w, drawn_h = img_w * scale, img_h * scale
+            canvas.save()
+            canvas.translate(-drawn_w / 2.0, visual_top + 20.0 + (photo_h - drawn_h) / 2.0)
+            canvas.scale(scale, scale)
+            canvas.drawImage(skia_img, 0, 0, skia.SamplingOptions(skia.FilterMode.kLinear))
+            canvas.restore()
+    elif has_vg and has_map and loc_text:
         # Co-render explicit vector graphic (left) and map card (right) without overlap
         vg_w = w * 0.54
         vg_h = h * 0.53
@@ -1214,8 +1287,8 @@ def draw_chapter_card(
         sw = measure_shaped_width(stamp_text, badge_font, hb_font, upem)
         pill_w = sw + 52.0
         pill_h = 52.0
-        stamp_cx = half_w - num_w - 110.0 - pill_w / 2.0
-        stamp_cy = -half_h + 36.0 + pill_h / 2.0
+        stamp_cx = (half_w - 36.0 - pill_w / 2.0) if (h > w) else (half_w - num_w - 110.0 - pill_w / 2.0)
+        stamp_cy = (-half_h + 102.0 + pill_h / 2.0) if (h > w) else (-half_h + 36.0 + pill_h / 2.0)
 
         canvas.save()
         canvas.translate(stamp_cx, stamp_cy)
@@ -1361,18 +1434,20 @@ def render_world_canvas(
     upem: int,
     font_path: str,
     output_path: str,
+    canvas_w: int = WIDTH,
+    canvas_h: int = HEIGHT,
 ) -> None:
     """Render all chapters on one continuous 2D world canvas piped to FFmpeg."""
     total_frames = max(1, int(round(total_duration * FPS)))
     info = skia.ImageInfo.Make(
-        WIDTH, HEIGHT, skia.kRGBA_8888_ColorType, skia.kPremul_AlphaType
+        canvas_w, canvas_h, skia.kRGBA_8888_ColorType, skia.kPremul_AlphaType
     )
     surface = skia.Surface.MakeRaster(info)
 
     spotlight_paint = skia.Paint(
         Shader=skia.GradientShader.MakeRadial(
-            center=(WIDTH / 2.0, HEIGHT / 2.0),
-            radius=WIDTH * 0.68,
+            center=(canvas_w / 2.0, canvas_h / 2.0),
+            radius=max(canvas_w, canvas_h) * 0.68,
             colors=[
                 skia.ColorSetARGB(0, 0, 0, 0),
                 skia.ColorSetARGB(155, 2, 6, 23),
@@ -1386,7 +1461,7 @@ def render_world_canvas(
         "ffmpeg",
         "-f", "rawvideo",
         "-pix_fmt", "rgba",
-        "-s", f"{WIDTH}x{HEIGHT}",
+        "-s", f"{canvas_w}x{canvas_h}",
         "-r", str(FPS),
         "-i", "-",
         "-i", master_audio_path,
@@ -1418,11 +1493,13 @@ def render_world_canvas(
             canvas.clear(skia.ColorSetRGB(*theme["bg_bottom"]))
 
             canvas.save()
-            canvas.translate(WIDTH / 2.0, HEIGHT / 2.0)
+            canvas.translate(canvas_w / 2.0, canvas_h / 2.0)
             canvas.scale(cam_zoom, cam_zoom)
             canvas.translate(-cam_x, -cam_y)
 
-            draw_world_background(canvas, cam_x, cam_y, cam_zoom, theme, cards)
+            draw_world_background(
+                canvas, cam_x, cam_y, cam_zoom, theme, cards, canvas_w, canvas_h
+            )
 
             for idx, card in enumerate(cards):
                 is_curr = idx == active_idx
@@ -1445,7 +1522,7 @@ def render_world_canvas(
             canvas.restore()
 
             # Soft radial spotlight / vignette keeping focus on active card
-            canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), spotlight_paint)
+            canvas.drawRect(skia.Rect.MakeWH(canvas_w, canvas_h), spotlight_paint)
 
             proc.stdin.write(surface.toarray().tobytes())
 
@@ -1550,6 +1627,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Render Continuous 2D Cinematic Video")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
+    parser.add_argument("--aspect-ratio", choices=["16:9", "9:16"], default=None)
     args = parser.parse_args()
 
     os.makedirs(WORK_DIR, exist_ok=True)
@@ -1578,10 +1656,21 @@ def main() -> None:
     data, script_data, chapters, video_title = extract_chapters(payload)
     apply_chapter_enhancements(chapters, data, script_data)
     theme_name, theme = resolve_theme(data, script_data, chapters)
+    raw_ar = (
+        args.aspect_ratio
+        or script_data.get("aspect_ratio")
+        or data.get("aspect_ratio")
+        or payload.get("aspect_ratio")
+        or "16:9"
+    )
+    aspect_ratio, canvas_w, canvas_h = resolve_canvas_dimensions(raw_ar)
     default_series = script_data.get("series_title") or data.get("series_title")
     default_part = script_data.get("part_number") or data.get("part_number")
     print(f"Normalized data keys: {list(data.keys())}")
-    print(f"Using theme: {theme_name} | Total parsed chapters: {len(chapters)}")
+    print(
+        f"Using theme: {theme_name} | Aspect ratio: {aspect_ratio} ({canvas_w}x{canvas_h}) "
+        f"| Total parsed chapters: {len(chapters)}"
+    )
 
     # 1. Synthesize all chapter audio tracks and build master timeline
     audio_files: list[str] = []
@@ -1670,8 +1759,10 @@ def main() -> None:
     final_audio_path = mix_master_audio(master_audio_path, sfx_events, master_mix_path)
 
     # 2. Auto-layout chapter cards onto 2D world canvas
-    caption_font = skia.Font(typeface, 32)
-    cards = layout_chapter_cards(timeline_items, title_font, caption_font, hb_font, upem)
+    caption_font = skia.Font(typeface, 30 if canvas_h > canvas_w else 32)
+    cards = layout_chapter_cards(
+        timeline_items, title_font, caption_font, hb_font, upem, canvas_w, canvas_h
+    )
 
     # 3. Render continuous 30fps 2D world canvas with smooth camera transitions
     render_world_canvas(
@@ -1685,6 +1776,8 @@ def main() -> None:
         upem=upem,
         font_path=font_path,
         output_path=args.output,
+        canvas_w=canvas_w,
+        canvas_h=canvas_h,
     )
     print(f"Final continuous 2D explainer video saved to {args.output}")
 
