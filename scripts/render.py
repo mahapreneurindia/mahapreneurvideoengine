@@ -247,6 +247,54 @@ def render_chapter_clip(
     return clip_file
 
 
+def extract_chapters(payload: dict) -> list[dict]:
+    """Normalize nested/flat payloads and extract chapter dictionaries."""
+    client_payload = payload.get("client_payload")
+    if isinstance(client_payload, str):
+        try:
+            client_payload = json.loads(client_payload)
+        except json.JSONDecodeError:
+            client_payload = None
+
+    data = client_payload if isinstance(client_payload, dict) else payload
+    raw_chapters = data.get("chapters") or payload.get("chapters")
+
+    if isinstance(raw_chapters, str):
+        try:
+            raw_chapters = json.loads(raw_chapters)
+        except json.JSONDecodeError:
+            raw_chapters = None
+
+    if isinstance(raw_chapters, list) and raw_chapters:
+        return [ch for ch in raw_chapters if isinstance(ch, dict)]
+
+    print(
+        f"WARNING: No chapters found in payload. "
+        f"Root keys={list(payload.keys())}, data keys={list(data.keys())}"
+    )
+    fallback_title = data.get("title") or payload.get("title") or "प्रकरण १"
+    fallback_narration = (
+        data.get("marathi_narration")
+        or data.get("narration")
+        or data.get("script")
+        or ""
+    )
+    if not isinstance(fallback_narration, str):
+        fallback_narration = ""
+
+    return [
+        {
+            "scene": fallback_title,
+            "marathi_narration": fallback_narration,
+            "wiki_image_search": data.get("wiki_image_search")
+            or data.get("image_search")
+            or data.get("keyword")
+            or "",
+            "map_location": data.get("map_location") or data.get("location"),
+        }
+    ]
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render Cinematic Explainer Video")
     parser.add_argument("--payload", required=True)
@@ -272,25 +320,31 @@ def main() -> None:
     print("=== INCOMING NEXT.JS PAYLOAD ===")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
 
-    data = payload.get("client_payload", payload)
-    chapters = data.get("chapters", [])
-    if not chapters:
-        chapters = [
-            {
-                "scene": "डिफॉल्ट दृश्य",
-                "marathi_narration": "माहिती उपलब्ध नाही.",
-                "wiki_image_search": "Maharashtra agriculture",
-                "map_location": None,
-            }
-        ]
+    chapters = extract_chapters(payload)
+    print(f"Rendering {len(chapters)} chapter(s)...")
 
     clip_paths: list[str] = []
 
     for i, chapter in enumerate(chapters):
-        scene_title = chapter.get("scene", f"दृश्य {i + 1}")
-        narration = chapter.get("marathi_narration", "")
-        wiki_query = chapter.get("wiki_image_search") or chapter.get("map_location") or ""
-        map_location = chapter.get("map_location")
+        scene_title = (
+            chapter.get("scene")
+            or chapter.get("title")
+            or f"प्रकरण {i + 1}"
+        )
+        narration = (
+            chapter.get("marathi_narration")
+            or chapter.get("narration")
+            or chapter.get("script")
+            or ""
+        )
+        map_location = chapter.get("map_location") or chapter.get("location")
+        wiki_query = (
+            chapter.get("wiki_image_search")
+            or chapter.get("image_search")
+            or chapter.get("keyword")
+            or map_location
+            or ""
+        )
 
         # 1. Generate Voiceover Audio via Sarvam AI
         audio_file = get_sarvam_audio(narration, i, api_key)
@@ -319,8 +373,9 @@ def main() -> None:
     list_file = os.path.join(WORK_DIR, "concat_list.txt")
     with open(list_file, "w", encoding="utf-8") as f:
         for clip in clip_paths:
-            f.write(f"file '{clip}'\n")
+            f.write(f"file '{os.path.abspath(clip)}'\n")
 
+    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
     concat_cmd = [
         "ffmpeg", "-f", "concat", "-safe", "0",
         "-i", list_file, "-c", "copy", "-y", args.output,
