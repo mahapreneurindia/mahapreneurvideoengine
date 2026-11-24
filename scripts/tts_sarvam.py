@@ -9,8 +9,8 @@ import requests
 
 
 SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
-DEFAULT_SARVAM_SPEAKER = "anushka"
-DEFAULT_SARVAM_MODEL = "bulbul:v2"
+DEFAULT_SARVAM_SPEAKER = "kavya"
+DEFAULT_SARVAM_MODEL = "bulbul:v3"
 DEFAULT_EDGE_VOICE = "mr-IN-AarohiNeural"
 
 _JSON_TECH_KEYS_RE = re.compile(

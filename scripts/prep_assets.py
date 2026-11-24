@@ -99,6 +99,7 @@ def prepare_chapter_card(
     wiki_candidates: list[str],
     work_dir: str,
     target_size: tuple[int, int] = (1440, 810),
+    excluded_urls: set[str] | None = None,
 ) -> str | None:
     """Resolve chapter image (custom_image_url first, then Wikimedia) and frame it as a card."""
     raw_path = os.path.join(work_dir, f"raw_bg_{index}.png")
@@ -111,7 +112,7 @@ def prepare_chapter_card(
     if not fetched:
         for candidate in wiki_candidates:
             print(f"Chapter {index}: searching Wikimedia Commons for '{candidate}'...")
-            fetched = fetch_commons_image(candidate, raw_path)
+            fetched = fetch_commons_image(candidate, raw_path, excluded_urls=excluded_urls)
             if fetched:
                 break
 

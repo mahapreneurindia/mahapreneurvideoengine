@@ -155,7 +155,12 @@ def _is_color_photo(img: Image.Image) -> bool:
     return float(np.mean(spread)) >= 12.0
 
 
-def fetch_commons_image(query: str, output_path: str, width: int = 1920) -> str | None:
+def fetch_commons_image(
+    query: str,
+    output_path: str,
+    width: int = 1920,
+    excluded_urls: set[str] | None = None,
+) -> str | None:
     """Query Wikimedia Commons for a clean color landscape photo matching `query`."""
     if not query or not query.strip():
         return None
@@ -195,8 +200,11 @@ def fetch_commons_image(query: str, output_path: str, width: int = 1920) -> str 
     candidates.sort(key=lambda item: item[0], reverse=True)
 
     fallback_bw_img: Image.Image | None = None
+    fallback_bw_url: str | None = None
     for score, img_url in candidates:
         if score < -500:
+            continue
+        if excluded_urls and img_url in excluded_urls:
             continue
         try:
             img_resp = requests.get(img_url, headers=headers, timeout=20)
@@ -208,10 +216,13 @@ def fetch_commons_image(query: str, output_path: str, width: int = 1920) -> str 
             if not _is_color_photo(img):
                 if fallback_bw_img is None:
                     fallback_bw_img = img
+                    fallback_bw_url = img_url
                 continue
 
             os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
             img.save(output_path, format="PNG")
+            if excluded_urls is not None:
+                excluded_urls.add(img_url)
             print(
                 f"Fetched Wikimedia color photo for '{query}' "
                 f"({img.width}x{img.height}, score={score}) -> {output_path}"
@@ -224,6 +235,8 @@ def fetch_commons_image(query: str, output_path: str, width: int = 1920) -> str 
     if fallback_bw_img is not None:
         os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
         fallback_bw_img.save(output_path, format="PNG")
+        if excluded_urls is not None and fallback_bw_url:
+            excluded_urls.add(fallback_bw_url)
         print(f"Fetched Wikimedia fallback photo for '{query}' -> {output_path}")
         return output_path
 

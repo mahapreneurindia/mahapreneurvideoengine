@@ -21,7 +21,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from prep_assets import prepare_chapter_card
-from tts_sarvam import synthesize_marathi_tts
+from tts_sarvam import sanitize_tts_text, synthesize_marathi_tts
 
 WIDTH = 1920
 HEIGHT = 1080
@@ -280,6 +280,7 @@ def fetch_chapter_image(
     map_location: str | None,
     scene_title: str,
     video_title: str,
+    excluded_urls: set[str] | None = None,
 ) -> skia.Image | None:
     """Prioritize custom_image_url, then Wikimedia Commons, and frame as a designed card."""
     candidates = refine_photo_queries(wiki_query, map_location, scene_title, video_title)
@@ -288,6 +289,7 @@ def fetch_chapter_image(
         custom_image_url=custom_image_url,
         wiki_candidates=candidates,
         work_dir=WORK_DIR,
+        excluded_urls=excluded_urls,
     )
     return load_skia_image(card_path)
 
@@ -429,6 +431,60 @@ def split_script_into_chapters(
     return chapters
 
 
+def _recover_chapters_from_truncated_json(text: str) -> tuple[list[dict], dict]:
+    """Scan a truncated JSON payload for complete chapter objects inside `"chapters": [`."""
+    meta: dict = {}
+    title_match = re.search(r'"(?:video_title|title)"\s*:\s*"([^"]+)"', text)
+    if title_match:
+        meta["video_title"] = title_match.group(1)
+
+    chap_match = re.search(r'"chapters"\s*:\s*\[', text)
+    if not chap_match:
+        return [], meta
+
+    recovered: list[dict] = []
+    pos = chap_match.end()
+    n = len(text)
+    in_string = False
+    escape = False
+    depth = 0
+    obj_start = -1
+
+    while pos < n:
+        ch = text[pos]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+        else:
+            if ch == '"':
+                in_string = True
+            elif ch == "{":
+                if depth == 0:
+                    obj_start = pos
+                depth += 1
+            elif ch == "}":
+                if depth > 0:
+                    depth -= 1
+                    if depth == 0 and obj_start != -1:
+                        obj_str = text[obj_start : pos + 1]
+                        try:
+                            obj = json.loads(obj_str)
+                            if isinstance(obj, dict) and ("scene" in obj or "marathi_narration" in obj):
+                                recovered.append(normalize_chapter(obj, len(recovered)))
+                        except json.JSONDecodeError:
+                            pass
+                        obj_start = -1
+            elif ch == "]" and depth == 0:
+                break
+        pos += 1
+
+    return recovered, meta
+
+
 def reconstruct_split_json_chapters(raw_chapters: list[dict]) -> tuple[list[dict] | None, dict | None]:
     """Reconstruct inner chapters when a ```json ... ``` payload was sliced across wrapper chapters."""
     narrations = [
@@ -450,23 +506,26 @@ def reconstruct_split_json_chapters(raw_chapters: list[dict]) -> tuple[list[dict
         candidate = re.sub(r"```(?:json)?", "", candidate, flags=re.IGNORECASE).replace("```", "").strip()
         start_idx = candidate.find("{")
         end_idx = candidate.rfind("}")
-        if start_idx == -1 or end_idx <= start_idx:
-            continue
-        json_slice = candidate[start_idx : end_idx + 1]
-        try:
-            parsed = json.loads(json_slice)
-        except json.JSONDecodeError:
-            continue
+        if start_idx != -1 and end_idx > start_idx:
+            json_slice = candidate[start_idx : end_idx + 1]
+            try:
+                parsed = json.loads(json_slice)
+                if isinstance(parsed, dict) and isinstance(parsed.get("chapters"), list) and parsed["chapters"]:
+                    inner_list = [
+                        normalize_chapter(inner, idx)
+                        for idx, inner in enumerate(parsed["chapters"])
+                        if isinstance(inner, dict)
+                    ]
+                    if inner_list:
+                        print(f"Reconstructed {len(inner_list)} real chapters from split JSON payload")
+                        return inner_list, parsed
+            except json.JSONDecodeError:
+                pass
 
-        if isinstance(parsed, dict) and isinstance(parsed.get("chapters"), list) and parsed["chapters"]:
-            inner_list = [
-                normalize_chapter(inner, idx)
-                for idx, inner in enumerate(parsed["chapters"])
-                if isinstance(inner, dict)
-            ]
-            if inner_list:
-                print(f"Reconstructed {len(inner_list)} real chapters from split JSON payload")
-                return inner_list, parsed
+        recovered, meta = _recover_chapters_from_truncated_json(candidate)
+        if recovered:
+            print(f"Recovered {len(recovered)} complete chapters from truncated JSON payload")
+            return recovered, meta
 
     return None, None
 
@@ -1076,17 +1135,20 @@ def main() -> None:
     # 1. Synthesize all chapter audio tracks and build master timeline
     audio_files: list[str] = []
     timeline_items: list[dict] = []
+    used_urls: set[str] = set()
     cursor_sec = 0.0
 
     for i, chapter in enumerate(chapters):
         scene_title = str(
             chapter.get("scene") or chapter.get("title") or f"प्रकरण {i + 1}"
         )
-        narration = str(
-            chapter.get("marathi_narration")
-            or chapter.get("narration")
-            or chapter.get("script")
-            or ""
+        narration = sanitize_tts_text(
+            str(
+                chapter.get("marathi_narration")
+                or chapter.get("narration")
+                or chapter.get("script")
+                or ""
+            )
         )
         map_location = chapter.get("map_location") or chapter.get("location")
         custom_image_url = chapter.get("custom_image_url") or chapter.get("image_url")
@@ -1115,6 +1177,7 @@ def main() -> None:
             map_location=map_location,
             scene_title=scene_title,
             video_title=video_title,
+            excluded_urls=used_urls,
         )
 
         start_sec = cursor_sec
