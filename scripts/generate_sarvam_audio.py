@@ -1,11 +1,16 @@
 import argparse
 import os
-import requests
-import base64
 import subprocess
+import sys
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from tts_sarvam import synthesize_marathi_tts
 
 
-def main():
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--project", required=True)
     args = parser.parse_args()
@@ -16,7 +21,6 @@ def main():
     final_audio = os.path.join(audio_dir, "narration.wav")
 
     api_key = os.environ.get("SARVAM_API_KEY", "")
-    url = "https://api.sarvam.ai/text-to-speech"
 
     with open(script_path, "r", encoding="utf-8") as f:
         lines = [line.strip() for line in f if line.strip()]
@@ -24,38 +28,13 @@ def main():
     temp_files = []
     for i, text in enumerate(lines):
         temp_path = os.path.join(audio_dir, f"temp_{i}.wav")
-        payload = {
-            "inputs": [text],
-            "target_language_code": "mr-IN",
-            "speaker": "meera",
-            "pitch": 0,
-            "pace": 1.0,
-            "loudness": 1.5,
-            "speech_sample_rate": 8000,
-            "enable_preprocessing": True,
-            "model": "arya-tts"
-        }
-        headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
-
-        success = False
-        if api_key:
-            try:
-                response = requests.post(url, json=payload, headers=headers)
-                if response.status_code == 200:
-                    audio_base64 = response.json().get("audios", [])[0]
-                    with open(temp_path, "wb") as af:
-                        af.write(base64.b64decode(audio_base64))
-                    success = True
-            except Exception as e:
-                print(f"Sarvam API failed for line {i}: {e}")
-
-        if not success:
-            print(f"Using fallback silence for line {i}")
-            subprocess.run(
-                ["ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono", "-t", "3", "-y", temp_path],
-                check=True,
-            )
-
+        synthesize_marathi_tts(
+            text=text,
+            output_path=temp_path,
+            api_key=api_key,
+            lang_code="mr-IN",
+            label=f"line {i}",
+        )
         temp_files.append(temp_path)
 
     list_file = os.path.join(audio_dir, "concat.txt")

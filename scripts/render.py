@@ -22,6 +22,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from fetch_commons import fetch_commons_image
+from tts_sarvam import synthesize_marathi_tts
 
 WIDTH = 1920
 HEIGHT = 1080
@@ -30,56 +31,15 @@ WORK_DIR = "/tmp/video-job"
 
 
 def get_sarvam_audio(text: str, index: int, api_key: str) -> str:
-    """Generate voiceover audio via Sarvam AI TTS, falling back to silent audio."""
+    """Generate voiceover audio via Sarvam AI TTS with edge-tts and silence fallback."""
     audio_path = os.path.join(WORK_DIR, f"audio_{index}.wav")
-    fallback_cmd = [
-        "ffmpeg", "-f", "lavfi", "-i", "anullsrc=r=44100:cl=mono",
-        "-t", "3", "-y", audio_path,
-    ]
-
-    if not api_key:
-        print(f"WARNING: SARVAM_API_KEY is missing for chapter {index}; using 3s fallback silence.")
-        subprocess.run(fallback_cmd, check=True)
-        return audio_path
-
-    if not text.strip():
-        print(f"WARNING: Chapter {index} narration is empty; using 3s fallback silence.")
-        subprocess.run(fallback_cmd, check=True)
-        return audio_path
-
-    url = "https://api.sarvam.ai/text-to-speech"
-    payload = {
-        "inputs": [text],
-        "target_language_code": "mr-IN",
-        "speaker": "meera",
-        "pitch": 0,
-        "pace": 1.0,
-        "loudness": 1.5,
-        "speech_sample_rate": 8000,
-        "enable_preprocessing": True,
-        "model": "arya-tts",
-    }
-    headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
-
-    print(f"Requesting Sarvam TTS for chapter {index} (chars={len(text)})...")
-    try:
-        response = requests.post(url, json=payload, headers=headers, timeout=30)
-        print(f"Sarvam TTS chapter {index} HTTP status: {response.status_code}")
-        if response.status_code == 200:
-            audios = response.json().get("audios", [])
-            if audios:
-                with open(audio_path, "wb") as f:
-                    f.write(base64.b64decode(audios[0]))
-                print(f"Generated Sarvam TTS for chapter {index} -> {audio_path}")
-                return audio_path
-            print(f"Sarvam API 200 response missing 'audios': {response.text}")
-        else:
-            print(f"Sarvam API error ({response.status_code}): {response.text}")
-    except Exception as exc:
-        print(f"TTS Request failed for chapter {index}: {exc}")
-
-    subprocess.run(fallback_cmd, check=True)
-    return audio_path
+    return synthesize_marathi_tts(
+        text=text,
+        output_path=audio_path,
+        api_key=api_key,
+        lang_code="mr-IN",
+        label=f"chapter {index}",
+    )
 
 
 def get_audio_duration(audio_path: str) -> float:
