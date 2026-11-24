@@ -2,6 +2,7 @@ import argparse
 import base64
 import json
 import os
+import re
 import subprocess
 import sys
 import urllib.request
@@ -10,6 +11,11 @@ import numpy as np
 import requests
 import skia
 from PIL import Image
+
+try:
+    import uharfbuzz as hb
+except ImportError:
+    hb = None
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
@@ -31,8 +37,13 @@ def get_sarvam_audio(text: str, index: int, api_key: str) -> str:
         "-t", "3", "-y", audio_path,
     ]
 
-    if not api_key or not text.strip():
-        print("No Sarvam API key or empty narration, using fallback audio.")
+    if not api_key:
+        print(f"WARNING: SARVAM_API_KEY is missing for chapter {index}; using 3s fallback silence.")
+        subprocess.run(fallback_cmd, check=True)
+        return audio_path
+
+    if not text.strip():
+        print(f"WARNING: Chapter {index} narration is empty; using 3s fallback silence.")
         subprocess.run(fallback_cmd, check=True)
         return audio_path
 
@@ -50,18 +61,22 @@ def get_sarvam_audio(text: str, index: int, api_key: str) -> str:
     }
     headers = {"api-subscription-key": api_key, "Content-Type": "application/json"}
 
+    print(f"Requesting Sarvam TTS for chapter {index} (chars={len(text)})...")
     try:
         response = requests.post(url, json=payload, headers=headers, timeout=30)
+        print(f"Sarvam TTS chapter {index} HTTP status: {response.status_code}")
         if response.status_code == 200:
             audios = response.json().get("audios", [])
             if audios:
                 with open(audio_path, "wb") as f:
                     f.write(base64.b64decode(audios[0]))
-                print(f"Generated Sarvam TTS for chapter {index}")
+                print(f"Generated Sarvam TTS for chapter {index} -> {audio_path}")
                 return audio_path
-        print(f"Sarvam API error ({response.status_code}): {response.text}")
+            print(f"Sarvam API 200 response missing 'audios': {response.text}")
+        else:
+            print(f"Sarvam API error ({response.status_code}): {response.text}")
     except Exception as exc:
-        print(f"TTS Request failed: {exc}")
+        print(f"TTS Request failed for chapter {index}: {exc}")
 
     subprocess.run(fallback_cmd, check=True)
     return audio_path
@@ -87,7 +102,88 @@ def load_skia_image(image_path: str | None) -> skia.Image | None:
     return skia.Image.fromarray(arr, colorType=skia.kRGBA_8888_ColorType)
 
 
-def wrap_text(text: str, font: skia.Font, max_width: float) -> list[str]:
+def create_hb_font(font_path: str):
+    """Create a HarfBuzz font and upem scale factor if uharfbuzz is available."""
+    if hb is None or not os.path.isfile(font_path):
+        return None, 1000
+    try:
+        blob = hb.Blob.from_file_path(font_path)
+        face = hb.Face(blob)
+        hb_font = hb.Font(face)
+        return hb_font, face.upem or 1000
+    except Exception as exc:
+        print(f"WARNING: Failed to initialize uharfbuzz font: {exc}")
+        return None, 1000
+
+
+def shape_text(
+    text: str, skia_font: skia.Font, hb_font, upem: int
+) -> tuple[skia.TextBlob | None, float]:
+    """Shape Devanagari/Marathi text with uharfbuzz into a Skia TextBlob."""
+    if not text:
+        return None, 0.0
+    if hb is not None and hb_font is not None:
+        try:
+            buf = hb.Buffer()
+            buf.add_str(text)
+            buf.guess_segment_properties()
+            hb.shape(hb_font, buf)
+
+            scale = skia_font.getSize() / float(upem)
+            glyphs = [info.codepoint for info in buf.glyph_infos]
+            positions = []
+            cur_x, cur_y = 0.0, 0.0
+            for pos in buf.glyph_positions:
+                positions.append(
+                    skia.Point(
+                        cur_x + pos.x_offset * scale,
+                        cur_y - pos.y_offset * scale,
+                    )
+                )
+                cur_x += pos.x_advance * scale
+                cur_y -= pos.y_advance * scale
+
+            if glyphs:
+                builder = skia.TextBlobBuilder()
+                builder.allocRunPos(skia_font, glyphs, positions)
+                blob = builder.make()
+                if blob is not None:
+                    return blob, cur_x
+        except Exception as exc:
+            print(f"uharfbuzz shaping fallback for '{text[:20]}': {exc}")
+
+    return None, float(skia_font.measureText(text))
+
+
+def draw_shaped_text(
+    canvas: skia.Canvas,
+    text: str,
+    x: float,
+    y: float,
+    skia_font: skia.Font,
+    paint: skia.Paint,
+    hb_font,
+    upem: int,
+) -> None:
+    """Draw uharfbuzz-shaped TextBlob or fall back to Skia drawString."""
+    blob, _ = shape_text(text, skia_font, hb_font, upem)
+    if blob is not None:
+        canvas.drawTextBlob(blob, x, y, paint)
+    else:
+        canvas.drawString(text, x, y, skia_font, paint)
+
+
+def measure_shaped_width(
+    text: str, skia_font: skia.Font, hb_font, upem: int
+) -> float:
+    """Measure shaped text width."""
+    _, width = shape_text(text, skia_font, hb_font, upem)
+    return width
+
+
+def wrap_text(
+    text: str, skia_font: skia.Font, max_width: float, hb_font, upem: int
+) -> list[str]:
     """Wrap text into lines that fit within max_width."""
     words = text.split()
     if not words:
@@ -96,7 +192,7 @@ def wrap_text(text: str, font: skia.Font, max_width: float) -> list[str]:
     current = words[0]
     for word in words[1:]:
         candidate = f"{current} {word}"
-        if font.measureText(candidate) <= max_width:
+        if measure_shaped_width(candidate, skia_font, hb_font, upem) <= max_width:
             current = candidate
         else:
             lines.append(current)
@@ -105,18 +201,57 @@ def wrap_text(text: str, font: skia.Font, max_width: float) -> list[str]:
     return lines
 
 
+def fetch_chapter_image(
+    index: int,
+    wiki_query: str,
+    map_location: str | None,
+    scene_title: str,
+    video_title: str,
+) -> skia.Image | None:
+    """Try primary wiki_image_search then fallback queries derived from scene/title."""
+    candidates: list[str] = []
+    for raw_q in (wiki_query, map_location, scene_title, video_title):
+        if isinstance(raw_q, str):
+            q = raw_q.strip()
+            if q and q not in candidates:
+                candidates.append(q)
+
+    img_out = os.path.join(WORK_DIR, f"bg_{index}.png")
+    for candidate in candidates:
+        print(f"Chapter {index}: searching Wikimedia Commons for '{candidate}'...")
+        fetched_path = fetch_commons_image(candidate, img_out)
+        if fetched_path:
+            skia_img = load_skia_image(fetched_path)
+            if skia_img is not None:
+                return skia_img
+
+    print(f"WARNING: Chapter {index}: no Wikimedia Commons image found for candidates {candidates}")
+    return None
+
+
 def render_chapter_clip(
     index: int,
     scene_title: str,
+    wiki_query: str,
     map_location: str | None,
-    skia_img: skia.Image | None,
+    video_title: str,
     audio_file: str,
     duration: float,
     typeface: skia.Typeface,
+    hb_font,
+    upem: int,
 ) -> str:
-    """Render a Skia-animated panning chapter clip synced to audio duration."""
+    """Fetch visuals and render a Skia-animated panning chapter clip synced to audio duration."""
     clip_file = os.path.join(WORK_DIR, f"clip_{index}.mp4")
     total_frames = max(1, int(round(duration * FPS)))
+
+    skia_img = fetch_chapter_image(
+        index=index,
+        wiki_query=wiki_query,
+        map_location=map_location,
+        scene_title=scene_title,
+        video_title=video_title,
+    )
 
     info = skia.ImageInfo.Make(
         WIDTH, HEIGHT, skia.kRGBA_8888_ColorType, skia.kPremul_AlphaType
@@ -125,7 +260,7 @@ def render_chapter_clip(
 
     title_font = skia.Font(typeface, 68)
     badge_font = skia.Font(typeface, 32)
-    title_lines = wrap_text(scene_title, title_font, WIDTH - 240)
+    title_lines = wrap_text(scene_title, title_font, WIDTH - 240, hb_font, upem)
 
     ffmpeg_cmd = [
         "ffmpeg",
@@ -152,7 +287,6 @@ def render_chapter_clip(
     try:
         for frame_idx in range(total_frames):
             t = frame_idx / max(1, total_frames - 1)
-            # Ease in-out progress for smooth camera motion
             eased = t * t * (3.0 - 2.0 * t)
 
             canvas = surface.getCanvas()
@@ -161,7 +295,6 @@ def render_chapter_clip(
             if skia_img is not None:
                 img_w, img_h = skia_img.width(), skia_img.height()
                 base_scale = max(WIDTH / img_w, HEIGHT / img_h)
-                # Zoom slightly from 1.08x to 1.18x while panning horizontally
                 zoom = 1.08 + 0.10 * eased
                 scale = base_scale * zoom
                 drawn_w = img_w * scale
@@ -184,7 +317,6 @@ def render_chapter_clip(
                 )
                 canvas.restore()
             else:
-                # Subtle animated fallback backdrop when no image is available
                 bg_paint = skia.Paint(
                     Shader=skia.GradientShader.MakeLinear(
                         points=[(0, 0), (WIDTH, HEIGHT)],
@@ -202,35 +334,47 @@ def render_chapter_clip(
                     points=[(0, HEIGHT * 0.45), (0, HEIGHT)],
                     colors=[
                         skia.ColorSetARGB(0, 0, 0, 0),
-                        skia.ColorSetARGB(215, 2, 6, 23),
+                        skia.ColorSetARGB(220, 2, 6, 23),
                     ],
                 )
             )
             canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), scrim_paint)
 
-            # Optional map location badge
-            if map_location:
-                badge_text = f"📍 {map_location}"
-                badge_w = badge_font.measureText(badge_text)
+            # Optional map location badge with geometric pin icon
+            if map_location and str(map_location).strip():
+                loc_text = str(map_location).strip()
+                badge_w = measure_shaped_width(loc_text, badge_font, hb_font, upem)
                 pill_rect = skia.RRect.MakeRectXY(
-                    skia.Rect.MakeXYWH(72, 64, badge_w + 48, 56), 28, 28
+                    skia.Rect.MakeXYWH(72, 64, badge_w + 84, 58), 29, 29
                 )
                 pill_paint = skia.Paint(
-                    Color=skia.ColorSetARGB(190, 15, 23, 42), AntiAlias=True
+                    Color=skia.ColorSetARGB(205, 15, 23, 42), AntiAlias=True
                 )
                 canvas.drawRRect(pill_rect, pill_paint)
+
+                pin_paint = skia.Paint(
+                    Color=skia.ColorSetRGB(239, 68, 68), AntiAlias=True
+                )
+                canvas.drawCircle(104, 93, 10, pin_paint)
+                pin_inner = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
+                canvas.drawCircle(104, 93, 4, pin_inner)
+
                 badge_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
-                canvas.drawString(badge_text, 96, 103, badge_font, badge_paint)
+                draw_shaped_text(
+                    canvas, loc_text, 128, 104, badge_font, badge_paint, hb_font, upem
+                )
 
             # Centered Marathi scene title near the lower third
             text_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
             line_height = 84
             start_y = HEIGHT - 120 - (len(title_lines) - 1) * line_height
             for line_idx, line in enumerate(title_lines):
-                line_w = title_font.measureText(line)
+                line_w = measure_shaped_width(line, title_font, hb_font, upem)
                 x = (WIDTH - line_w) / 2.0
                 y = start_y + line_idx * line_height
-                canvas.drawString(line, x, y, title_font, text_paint)
+                draw_shaped_text(
+                    canvas, line, x, y, title_font, text_paint, hb_font, upem
+                )
 
             frame_bytes = surface.toarray().tobytes()
             proc.stdin.write(frame_bytes)
@@ -247,7 +391,38 @@ def render_chapter_clip(
     return clip_file
 
 
-def extract_chapters(payload: dict) -> list[dict]:
+def split_script_into_chapters(
+    script_text: str,
+    title: str,
+    wiki_search: str,
+    map_location: str | None,
+) -> list[dict]:
+    """Split a plain script string into narrative segments so long scripts are not collapsed."""
+    segments = [s.strip() for s in re.split(r"\n+", script_text) if s.strip()]
+    if len(segments) <= 1:
+        segments = [
+            s.strip()
+            for s in re.split(r"(?<=[।.!?])\s+", script_text.strip())
+            if s.strip()
+        ]
+    if not segments:
+        return []
+
+    chapters: list[dict] = []
+    for idx, seg in enumerate(segments):
+        scene_label = title if len(segments) == 1 else f"{title} ({idx + 1}/{len(segments)})"
+        chapters.append(
+            {
+                "scene": scene_label,
+                "marathi_narration": seg,
+                "wiki_image_search": wiki_search,
+                "map_location": map_location,
+            }
+        )
+    return chapters
+
+
+def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
     """Normalize nested/flat payloads and extract chapter dictionaries."""
     client_payload = payload.get("client_payload")
     if isinstance(client_payload, str):
@@ -257,8 +432,9 @@ def extract_chapters(payload: dict) -> list[dict]:
             client_payload = None
 
     data = client_payload if isinstance(client_payload, dict) else payload
-    raw_chapters = data.get("chapters") or payload.get("chapters")
+    video_title = str(data.get("title") or payload.get("title") or "प्रकरण १")
 
+    raw_chapters = data.get("chapters") or payload.get("chapters")
     if isinstance(raw_chapters, str):
         try:
             raw_chapters = json.loads(raw_chapters)
@@ -266,33 +442,52 @@ def extract_chapters(payload: dict) -> list[dict]:
             raw_chapters = None
 
     if isinstance(raw_chapters, list) and raw_chapters:
-        return [ch for ch in raw_chapters if isinstance(ch, dict)]
+        valid = [ch for ch in raw_chapters if isinstance(ch, dict)]
+        if valid:
+            return data, valid, video_title
 
     print(
-        f"WARNING: No chapters found in payload. "
-        f"Root keys={list(payload.keys())}, data keys={list(data.keys())}"
+        f"WARNING: 'chapters' list missing or empty. "
+        f"Top-level keys={list(payload.keys())}, data keys={list(data.keys())}"
     )
-    fallback_title = data.get("title") or payload.get("title") or "प्रकरण १"
-    fallback_narration = (
-        data.get("marathi_narration")
+
+    fallback_script = (
+        data.get("script")
+        or data.get("marathi_narration")
         or data.get("narration")
-        or data.get("script")
+        or payload.get("script")
+        or payload.get("marathi_narration")
+        or payload.get("narration")
         or ""
     )
-    if not isinstance(fallback_narration, str):
-        fallback_narration = ""
+    wiki_search = str(
+        data.get("wiki_image_search")
+        or data.get("image_search")
+        or data.get("keyword")
+        or ""
+    )
+    map_location = data.get("map_location") or data.get("location")
 
-    return [
-        {
-            "scene": fallback_title,
-            "marathi_narration": fallback_narration,
-            "wiki_image_search": data.get("wiki_image_search")
-            or data.get("image_search")
-            or data.get("keyword")
-            or "",
-            "map_location": data.get("map_location") or data.get("location"),
-        }
-    ]
+    if isinstance(fallback_script, str) and fallback_script.strip():
+        split_chapters = split_script_into_chapters(
+            fallback_script, video_title, wiki_search, map_location
+        )
+        if split_chapters:
+            print(f"Split fallback script into {len(split_chapters)} chapter(s).")
+            return data, split_chapters, video_title
+
+    return (
+        data,
+        [
+            {
+                "scene": video_title,
+                "marathi_narration": "",
+                "wiki_image_search": wiki_search,
+                "map_location": map_location,
+            }
+        ],
+        video_title,
+    )
 
 
 def main() -> None:
@@ -313,37 +508,45 @@ def main() -> None:
         )
 
     typeface = skia.Typeface.MakeFromFile(font_path) or skia.Typeface.MakeDefault()
+    hb_font, upem = create_hb_font(font_path)
 
     with open(args.payload, "r", encoding="utf-8") as f:
         payload = json.load(f)
 
     print("=== INCOMING NEXT.JS PAYLOAD ===")
     print(json.dumps(payload, indent=2, ensure_ascii=False))
+    print(f"Top-level payload keys: {list(payload.keys())}")
 
-    chapters = extract_chapters(payload)
-    print(f"Rendering {len(chapters)} chapter(s)...")
+    data, chapters, video_title = extract_chapters(payload)
+    print(f"Normalized data keys: {list(data.keys())}")
+    print(f"Total parsed chapters: {len(chapters)}")
 
     clip_paths: list[str] = []
 
     for i, chapter in enumerate(chapters):
-        scene_title = (
+        scene_title = str(
             chapter.get("scene")
             or chapter.get("title")
             or f"प्रकरण {i + 1}"
         )
-        narration = (
+        narration = str(
             chapter.get("marathi_narration")
             or chapter.get("narration")
             or chapter.get("script")
             or ""
         )
         map_location = chapter.get("map_location") or chapter.get("location")
-        wiki_query = (
+        wiki_query = str(
             chapter.get("wiki_image_search")
             or chapter.get("image_search")
             or chapter.get("keyword")
-            or map_location
             or ""
+        )
+
+        print(
+            f"Chapter {i}: keys={list(chapter.keys())}, "
+            f"scene={scene_title!r}, narration_chars={len(narration)}, "
+            f"wiki_image_search={wiki_query!r}, map_location={map_location!r}"
         )
 
         # 1. Generate Voiceover Audio via Sarvam AI
@@ -351,25 +554,24 @@ def main() -> None:
 
         # 2. Measure Audio Duration
         duration = get_audio_duration(audio_file)
+        print(f"Chapter {i}: audio duration = {duration:.2f}s")
 
-        # 3. Fetch Wikimedia Commons image for visual context
-        img_out = os.path.join(WORK_DIR, f"bg_{i}.png")
-        fetched_path = fetch_commons_image(wiki_query, img_out) if wiki_query else None
-        skia_img = load_skia_image(fetched_path)
-
-        # 4. Render Skia panning canvas synced to audio duration
+        # 3. Render Skia panning canvas synced to audio duration
         clip_file = render_chapter_clip(
             index=i,
             scene_title=scene_title,
+            wiki_query=wiki_query,
             map_location=map_location,
-            skia_img=skia_img,
+            video_title=video_title,
             audio_file=audio_file,
             duration=duration,
             typeface=typeface,
+            hb_font=hb_font,
+            upem=upem,
         )
         clip_paths.append(clip_file)
 
-    # 5. Stitch scenes together
+    # 4. Stitch scenes together
     list_file = os.path.join(WORK_DIR, "concat_list.txt")
     with open(list_file, "w", encoding="utf-8") as f:
         for clip in clip_paths:
