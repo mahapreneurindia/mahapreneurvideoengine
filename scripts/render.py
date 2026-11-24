@@ -429,6 +429,48 @@ def split_script_into_chapters(
     return chapters
 
 
+def reconstruct_split_json_chapters(raw_chapters: list[dict]) -> tuple[list[dict] | None, dict | None]:
+    """Reconstruct inner chapters when a ```json ... ``` payload was sliced across wrapper chapters."""
+    narrations = [
+        str(
+            ch.get("marathi_narration")
+            or ch.get("narration")
+            or ch.get("script")
+            or ""
+        )
+        for ch in raw_chapters
+        if isinstance(ch, dict)
+    ]
+    joined_check = "\n".join(narrations)
+    if not any(tok in joined_check for tok in ("```json", '"chapters"', '"video_title"')):
+        return None, None
+
+    for sep in ("", "\n"):
+        candidate = sep.join(narrations).strip()
+        candidate = re.sub(r"```(?:json)?", "", candidate, flags=re.IGNORECASE).replace("```", "").strip()
+        start_idx = candidate.find("{")
+        end_idx = candidate.rfind("}")
+        if start_idx == -1 or end_idx <= start_idx:
+            continue
+        json_slice = candidate[start_idx : end_idx + 1]
+        try:
+            parsed = json.loads(json_slice)
+        except json.JSONDecodeError:
+            continue
+
+        if isinstance(parsed, dict) and isinstance(parsed.get("chapters"), list) and parsed["chapters"]:
+            inner_list = [
+                normalize_chapter(inner, idx)
+                for idx, inner in enumerate(parsed["chapters"])
+                if isinstance(inner, dict)
+            ]
+            if inner_list:
+                print(f"Reconstructed {len(inner_list)} real chapters from split JSON payload")
+                return inner_list, parsed
+
+    return None, None
+
+
 def extract_chapters(payload: dict) -> tuple[dict, dict, list[dict], str]:
     """Normalize nested/flat payloads (including script_data) and extract chapters."""
     client_payload = parse_json_maybe(payload.get("client_payload"))
@@ -440,7 +482,9 @@ def extract_chapters(payload: dict) -> tuple[dict, dict, list[dict], str]:
         script_data = {}
 
     video_title = str(
-        script_data.get("title")
+        script_data.get("video_title")
+        or script_data.get("title")
+        or data.get("video_title")
         or data.get("title")
         or payload.get("title")
         or "प्रकरण १"
@@ -453,6 +497,15 @@ def extract_chapters(payload: dict) -> tuple[dict, dict, list[dict], str]:
     )
     parsed_chapters = parse_json_maybe(raw_chapters)
     if isinstance(parsed_chapters, list) and parsed_chapters:
+        reconstructed, inner_meta = reconstruct_split_json_chapters(parsed_chapters)
+        if reconstructed:
+            if isinstance(inner_meta, dict):
+                if inner_meta.get("video_title") or inner_meta.get("title"):
+                    video_title = str(inner_meta.get("video_title") or inner_meta.get("title"))
+                if isinstance(inner_meta.get("branding"), dict):
+                    script_data = {**script_data, "branding": inner_meta["branding"]}
+            return data, script_data, reconstructed, video_title
+
         expanded = expand_nested_chapters(parsed_chapters)
         if expanded:
             return data, script_data, expanded, video_title
@@ -530,9 +583,33 @@ def resolve_theme(data: dict, script_data: dict) -> tuple[str, dict]:
     return theme_name, THEMES[theme_name]
 
 
+def split_caption_chunks(
+    narration: str,
+    caption_font: skia.Font,
+    max_width: float,
+    hb_font,
+    upem: int,
+) -> list[list[str]]:
+    """Split chapter narration into readable 1-2 line Marathi caption chunks."""
+    if not narration or not narration.strip():
+        return []
+    sentences = [
+        s.strip()
+        for s in re.split(r"(?<=[।.!?])\s+|\n+", narration.strip())
+        if s.strip()
+    ]
+    chunks: list[list[str]] = []
+    for sent in sentences:
+        wrapped = wrap_text(sent, caption_font, max_width, hb_font, upem)
+        for i in range(0, len(wrapped), 2):
+            chunks.append(wrapped[i : i + 2])
+    return chunks
+
+
 def layout_chapter_cards(
     timeline_items: list[dict],
     title_font: skia.Font,
+    caption_font: skia.Font,
     hb_font,
     upem: int,
 ) -> list[dict]:
@@ -553,6 +630,9 @@ def layout_chapter_cards(
         cy = 750.0 + row * row_step + jitter_y
         angle = rotations[idx % len(rotations)]
         title_lines = wrap_text(item["scene"], title_font, card_w - 180.0, hb_font, upem)
+        caption_chunks = split_caption_chunks(
+            item.get("narration", ""), caption_font, card_w - 160.0, hb_font, upem
+        )
 
         cards.append(
             {
@@ -563,6 +643,8 @@ def layout_chapter_cards(
                 "h": card_h,
                 "angle": angle,
                 "title_lines": title_lines,
+                "caption_chunks": caption_chunks,
+                "caption_font": caption_font,
             }
         )
     return cards
@@ -661,19 +743,19 @@ def draw_chapter_card(
     fill_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["card_bg"]), AntiAlias=True)
     canvas.drawRect(card_rect, fill_paint)
 
+    # Fit framed photo card cleanly in upper/middle zone above title + caption bar
     skia_img = card.get("skia_img")
     if skia_img is not None:
         img_w, img_h = skia_img.width(), skia_img.height()
-        # Fit the pre-framed 16:9 photo card cleanly inside the board card with margins
-        target_w = w * 0.88
-        target_h = h * 0.72
+        target_w = w * 0.86
+        target_h = h * 0.58
         base_scale = min(target_w / img_w, target_h / img_h)
         zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
         scale = base_scale * zoom
         drawn_w = img_w * scale
         drawn_h = img_h * scale
         canvas.save()
-        canvas.translate(-drawn_w / 2.0, -half_h + 76.0 + (target_h - drawn_h) / 2.0)
+        canvas.translate(-drawn_w / 2.0, -half_h + 88.0 + (target_h - drawn_h) / 2.0)
         canvas.scale(scale, scale)
         canvas.drawImage(
             skia_img,
@@ -750,28 +832,54 @@ def draw_chapter_card(
             upem,
         )
 
-    # Rounded title container at bottom of card
+    # Marathi scene title + synced Marathi caption bar at bottom of card
+    caption_chunks: list[list[str]] = card.get("caption_chunks") or []
+    caption_font = card.get("caption_font")
+    active_chunk: list[str] = []
+    if caption_chunks:
+        chunk_idx = min(len(caption_chunks) - 1, max(0, int(local_progress * len(caption_chunks))))
+        active_chunk = caption_chunks[chunk_idx]
+
+    caption_line_h = 44.0
+    caption_h = (len(active_chunk) * caption_line_h + 28.0) if active_chunk else 0.0
+    caption_y = half_h - 28.0 - caption_h
+
+    if active_chunk and caption_font is not None:
+        cap_rrect = skia.RRect.MakeRectXY(
+            skia.Rect.MakeXYWH(-half_w + 48.0, caption_y, w - 96.0, caption_h), 16, 16
+        )
+        canvas.drawRRect(
+            cap_rrect,
+            skia.Paint(Color=skia.ColorSetARGB(220, 2, 6, 23), AntiAlias=True),
+        )
+        cap_paint = skia.Paint(Color=skia.ColorSetRGB(226, 232, 240), AntiAlias=True)
+        for ci, cline in enumerate(active_chunk):
+            cw = measure_shaped_width(cline, caption_font, hb_font, upem)
+            cx_pos = -cw / 2.0
+            cy_pos = caption_y + 42.0 + ci * caption_line_h
+            draw_shaped_text(canvas, cline, cx_pos, cy_pos, caption_font, cap_paint, hb_font, upem)
+
     title_lines = card["title_lines"]
-    line_height = 76.0
+    line_height = 68.0
     line_widths = [
         measure_shaped_width(line, title_font, hb_font, upem) for line in title_lines
     ]
     max_lw = max(line_widths) if line_widths else 0.0
-    pad_x, pad_y = 44.0, 26.0
+    pad_x, pad_y = 40.0, 20.0
     box_w = min(w - 96.0, max_lw + pad_x * 2)
     box_h = len(title_lines) * line_height + pad_y * 2
     box_x = -box_w / 2.0
-    box_y = half_h - 44.0 - box_h
+    box_y = (caption_y - 16.0 - box_h) if active_chunk else (half_h - 44.0 - box_h)
     box_rrect = skia.RRect.MakeRectXY(
-        skia.Rect.MakeXYWH(box_x, box_y, box_w, box_h), 20, 20
+        skia.Rect.MakeXYWH(box_x, box_y, box_w, box_h), 18, 18
     )
     canvas.drawRRect(
         box_rrect,
-        skia.Paint(Color=skia.ColorSetARGB(195, 15, 23, 42), AntiAlias=True),
+        skia.Paint(Color=skia.ColorSetARGB(205, 15, 23, 42), AntiAlias=True),
     )
 
-    text_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
-    start_y = box_y + pad_y + 54.0
+    text_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["accent"]), AntiAlias=True)
+    start_y = box_y + pad_y + 48.0
     for li, line in enumerate(title_lines):
         lx = -line_widths[li] / 2.0
         ly = start_y + li * line_height
@@ -1018,6 +1126,7 @@ def main() -> None:
             {
                 "index": i,
                 "scene": scene_title,
+                "narration": narration,
                 "map_location": map_location,
                 "skia_img": skia_img,
                 "start_sec": start_sec,
@@ -1029,7 +1138,8 @@ def main() -> None:
     build_master_audio(audio_files, master_audio_path)
 
     # 2. Auto-layout chapter cards onto 2D world canvas
-    cards = layout_chapter_cards(timeline_items, title_font, hb_font, upem)
+    caption_font = skia.Font(typeface, 32)
+    cards = layout_chapter_cards(timeline_items, title_font, caption_font, hb_font, upem)
 
     # 3. Render continuous 30fps 2D world canvas with smooth camera transitions
     render_world_canvas(

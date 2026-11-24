@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import os
+import re
 import subprocess
 import sys
 
@@ -11,6 +12,24 @@ SARVAM_TTS_URL = "https://api.sarvam.ai/text-to-speech"
 DEFAULT_SARVAM_SPEAKER = "anushka"
 DEFAULT_SARVAM_MODEL = "bulbul:v2"
 DEFAULT_EDGE_VOICE = "mr-IN-AarohiNeural"
+
+_JSON_TECH_KEYS_RE = re.compile(
+    r'\b(?:video_title|marathi_narration|narration|wiki_image_search|map_location|custom_image_url|chapters|branding|theme|scene|null)\b',
+    re.IGNORECASE,
+)
+
+
+def sanitize_tts_text(text: str) -> str:
+    """Strip accidental markdown fences, JSON braces/brackets, and technical keys."""
+    if not text:
+        return ""
+    cleaned = re.sub(r"```(?:json)?", " ", text, flags=re.IGNORECASE)
+    cleaned = cleaned.replace("```", " ")
+    cleaned = re.sub(r"[{}\[\]\"]", " ", cleaned)
+    cleaned = _JSON_TECH_KEYS_RE.sub(" ", cleaned)
+    cleaned = re.sub(r"\s*[:;,]\s*", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
 
 
 def _create_silence_wav(output_path: str, seconds: int = 3) -> str:
@@ -69,9 +88,11 @@ def synthesize_marathi_tts(
     """Generate Marathi WAV audio via Sarvam AI, falling back to edge-tts then silence."""
     os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
 
-    if not text or not text.strip():
+    cleaned_input = sanitize_tts_text(text or "")
+    if not cleaned_input:
         print(f"WARNING: Empty narration for {label}; using 3s fallback silence.")
         return _create_silence_wav(output_path, seconds=3)
+    text = cleaned_input
 
     key = (api_key if api_key is not None else os.environ.get("SARVAM_API_KEY", "")).strip()
     speaker = os.environ.get("SARVAM_SPEAKER", DEFAULT_SARVAM_SPEAKER).strip() or DEFAULT_SARVAM_SPEAKER
