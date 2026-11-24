@@ -20,6 +20,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from make_graphics import draw_vector_graphic
 from make_map import draw_map_card
 from make_sfx import ensure_sfx_assets
 from prep_assets import prepare_chapter_card
@@ -408,6 +409,7 @@ def normalize_chapter(
     map_loc = ch.get("map_location") or ch.get("location") or fallback_map
     custom_img = ch.get("custom_image_url") or ch.get("image_url")
     highlight_stat = ch.get("highlight_stat") or ch.get("stamp_text")
+    vector_graphic = ch.get("vector_graphic") if isinstance(ch.get("vector_graphic"), dict) else None
     return {
         "scene": scene,
         "marathi_narration": narration,
@@ -415,6 +417,7 @@ def normalize_chapter(
         "map_location": map_loc,
         "custom_image_url": custom_img,
         "highlight_stat": str(highlight_stat).strip() if highlight_stat else None,
+        "vector_graphic": vector_graphic,
     }
 
 
@@ -864,20 +867,23 @@ def draw_chapter_card(
 
     loc_text = format_map_location(card.get("map_location"))
     has_map = bool(loc_text)
+    vg_spec = card.get("vector_graphic") if not has_map else None
+    has_vg = isinstance(vg_spec, dict)
+    has_split = has_map or has_vg
 
-    # Fit framed photo card cleanly in upper/middle zone (split layout if map_location is present)
+    # Fit framed photo card cleanly in upper/middle zone (split layout if map or vector graphic is present)
     skia_img = card.get("skia_img")
     if skia_img is not None:
         img_w, img_h = skia_img.width(), skia_img.height()
-        target_w = (w * 0.56) if has_map else (w * 0.86)
-        target_h = (h * 0.55) if has_map else (h * 0.58)
+        target_w = (w * 0.54) if has_split else (w * 0.86)
+        target_h = (h * 0.55) if has_split else (h * 0.58)
         base_scale = min(target_w / img_w, target_h / img_h)
         zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
         scale = base_scale * zoom
         drawn_w = img_w * scale
         drawn_h = img_h * scale
-        img_x = (-half_w + 48.0 + (target_w - drawn_w) / 2.0) if has_map else (-drawn_w / 2.0)
-        img_y = (-half_h + 98.0 + (target_h - drawn_h) / 2.0) if has_map else (-half_h + 88.0 + (target_h - drawn_h) / 2.0)
+        img_x = (-half_w + 48.0 + (target_w - drawn_w) / 2.0) if has_split else (-drawn_w / 2.0)
+        img_y = (-half_h + 98.0 + (target_h - drawn_h) / 2.0) if has_split else (-half_h + 88.0 + (target_h - drawn_h) / 2.0)
         canvas.save()
         canvas.translate(img_x, img_y)
         canvas.scale(scale, scale)
@@ -890,13 +896,23 @@ def draw_chapter_card(
         canvas.restore()
 
     if has_map and loc_text:
-        map_w = w * 0.33
+        map_w = w * 0.34
         map_h = h * 0.53
         map_x = half_w - 48.0 - map_w
         map_y = -half_h + 104.0
         map_rect = skia.Rect.MakeXYWH(map_x, map_y, map_w, map_h)
         map_progress = min(1.0, max(0.0, elapsed_sec / 1.5)) if is_active else 1.0
         draw_map_card(canvas, map_rect, loc_text, map_progress, font_path)
+    elif has_vg and vg_spec is not None:
+        vg_w = (w * 0.36) if skia_img is not None else (w * 0.78)
+        vg_h = h * 0.53
+        vg_x = (half_w - 48.0 - vg_w) if skia_img is not None else (-vg_w / 2.0)
+        vg_y = -half_h + 104.0
+        vg_rect = skia.Rect.MakeXYWH(vg_x, vg_y, vg_w, vg_h)
+        card_dur = float(card.get("duration") or 5.0)
+        anim_window = min(4.0, max(0.5, card_dur * 0.75))
+        vg_progress = min(1.0, max(0.0, elapsed_sec / anim_window)) if is_active else 1.0
+        draw_vector_graphic(canvas, vg_rect, vg_spec, vg_progress, font_path)
 
     # Bottom gradient scrim
     scrim_paint = skia.Paint(
@@ -1225,8 +1241,41 @@ def render_world_canvas(
         raise
 
 
+def infer_vector_graphic(chapter: dict) -> dict | None:
+    """Auto-infer a clean Skia vector graphic for abstract chapters without map/custom photo."""
+    if isinstance(chapter.get("vector_graphic"), dict):
+        return chapter["vector_graphic"]
+    if format_map_location(chapter.get("map_location")) or chapter.get("custom_image_url"):
+        return None
+
+    scene = str(chapter.get("scene") or "").strip()
+    narration = str(chapter.get("marathi_narration") or "").strip()
+    combined = f"{scene} {narration}".lower()
+
+    if any(tok in combined for tok in ("१००%", "शंभर टक्के", "100%")):
+        return {
+            "type": "stat_counter",
+            "target_value": 100,
+            "suffix": "%",
+            "subtitle": scene or "शुद्ध आणि नैसर्गिक हमी",
+        }
+    if any(tok in combined for tok in ("प्रक्रिया", "पद्धत", "टप्पे")):
+        return {
+            "type": "process_steps",
+            "title": scene or "कार्यपद्धती",
+            "steps": ["निवड", "प्रक्रिया", "चाचणी", "वितरण"],
+        }
+    if any(tok in combined for tok in ("फायदे", "हमी", "वैशिष्ट्ये", "गुणधर्म")):
+        return {
+            "type": "checklist",
+            "title": scene or "मुख्य फायदे",
+            "items": ["नैसर्गिक व शुद्ध", "प्रतिजैविकमुक्त", "आरोग्यदायी गुणवत्ता"],
+        }
+    return None
+
+
 def apply_chapter_enhancements(chapters: list[dict], data: dict, script_data: dict) -> None:
-    """Ensure a fallback map_location exists and derive kinetic Marathi stamps when missing."""
+    """Ensure a fallback map_location exists and derive kinetic Marathi stamps and vector graphics."""
     branding = script_data.get("branding") or data.get("branding") or {}
     enterprise_name = (
         str(branding.get("enterprise_name") or "").strip()
@@ -1257,6 +1306,10 @@ def apply_chapter_enhancements(chapters: list[dict], data: dict, script_data: di
     used_auto_stamps: set[str] = set()
     auto_count = 0
     for ch in chapters:
+        if not ch.get("vector_graphic"):
+            inferred_vg = infer_vector_graphic(ch)
+            if inferred_vg:
+                ch["vector_graphic"] = inferred_vg
         if ch.get("highlight_stat"):
             continue
         if auto_count >= 3:
@@ -1368,7 +1421,9 @@ def main() -> None:
                 "narration": narration,
                 "map_location": map_location,
                 "highlight_stat": highlight_stat,
+                "vector_graphic": chapter.get("vector_graphic"),
                 "skia_img": skia_img,
+                "duration": duration,
                 "start_sec": start_sec,
                 "end_sec": end_sec,
             }
