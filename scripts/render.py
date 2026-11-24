@@ -20,7 +20,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
-from fetch_commons import fetch_commons_image
+from prep_assets import prepare_chapter_card
 from tts_sarvam import synthesize_marathi_tts
 
 WIDTH = 1920
@@ -275,25 +275,21 @@ def refine_photo_queries(
 
 def fetch_chapter_image(
     index: int,
+    custom_image_url: str | None,
     wiki_query: str,
     map_location: str | None,
     scene_title: str,
     video_title: str,
 ) -> skia.Image | None:
-    """Try refined photographic queries then domain-relevant fallback queries."""
+    """Prioritize custom_image_url, then Wikimedia Commons, and frame as a designed card."""
     candidates = refine_photo_queries(wiki_query, map_location, scene_title, video_title)
-
-    img_out = os.path.join(WORK_DIR, f"bg_{index}.png")
-    for candidate in candidates:
-        print(f"Chapter {index}: searching Wikimedia Commons for '{candidate}'...")
-        fetched_path = fetch_commons_image(candidate, img_out)
-        if fetched_path:
-            skia_img = load_skia_image(fetched_path)
-            if skia_img is not None:
-                return skia_img
-
-    print(f"WARNING: Chapter {index}: no Wikimedia Commons image found for candidates {candidates}")
-    return None
+    card_path = prepare_chapter_card(
+        index=index,
+        custom_image_url=custom_image_url,
+        wiki_candidates=candidates,
+        work_dir=WORK_DIR,
+    )
+    return load_skia_image(card_path)
 
 
 def parse_json_maybe(value):
@@ -352,11 +348,13 @@ def normalize_chapter(
         or ""
     )
     map_loc = ch.get("map_location") or ch.get("location") or fallback_map
+    custom_img = ch.get("custom_image_url") or ch.get("image_url")
     return {
         "scene": scene,
         "marathi_narration": narration,
         "wiki_image_search": wiki,
         "map_location": map_loc,
+        "custom_image_url": custom_img,
     }
 
 
@@ -660,16 +658,22 @@ def draw_chapter_card(
     canvas.save()
     canvas.clipRRect(rrect, doAntiAlias=True)
 
+    fill_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["card_bg"]), AntiAlias=True)
+    canvas.drawRect(card_rect, fill_paint)
+
     skia_img = card.get("skia_img")
     if skia_img is not None:
         img_w, img_h = skia_img.width(), skia_img.height()
-        base_scale = max(w / img_w, h / img_h)
-        zoom = 1.04 + (0.06 * local_progress if is_active else 0.0)
+        # Fit the pre-framed 16:9 photo card cleanly inside the board card with margins
+        target_w = w * 0.88
+        target_h = h * 0.72
+        base_scale = min(target_w / img_w, target_h / img_h)
+        zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
         scale = base_scale * zoom
         drawn_w = img_w * scale
         drawn_h = img_h * scale
         canvas.save()
-        canvas.translate(-drawn_w / 2.0, -drawn_h / 2.0)
+        canvas.translate(-drawn_w / 2.0, -half_h + 76.0 + (target_h - drawn_h) / 2.0)
         canvas.scale(scale, scale)
         canvas.drawImage(
             skia_img,
@@ -678,9 +682,6 @@ def draw_chapter_card(
             skia.SamplingOptions(skia.FilterMode.kLinear),
         )
         canvas.restore()
-    else:
-        fill_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["card_bg"]), AntiAlias=True)
-        canvas.drawRect(card_rect, fill_paint)
 
     # Bottom gradient scrim
     scrim_paint = skia.Paint(
@@ -980,6 +981,7 @@ def main() -> None:
             or ""
         )
         map_location = chapter.get("map_location") or chapter.get("location")
+        custom_image_url = chapter.get("custom_image_url") or chapter.get("image_url")
         wiki_query = str(
             chapter.get("wiki_image_search")
             or chapter.get("image_search")
@@ -990,6 +992,7 @@ def main() -> None:
         print(
             f"Chapter {i}: keys={list(chapter.keys())}, "
             f"scene={scene_title!r}, narration_chars={len(narration)}, "
+            f"custom_image_url={custom_image_url!r}, "
             f"wiki_image_search={wiki_query!r}, map_location={map_location!r}"
         )
 
@@ -999,6 +1002,7 @@ def main() -> None:
 
         skia_img = fetch_chapter_image(
             index=i,
+            custom_image_url=custom_image_url,
             wiki_query=wiki_query,
             map_location=map_location,
             scene_title=scene_title,
