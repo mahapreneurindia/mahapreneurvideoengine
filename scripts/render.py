@@ -863,9 +863,14 @@ def render_world_canvas(
         "-i", "-",
         "-i", master_audio_path,
         "-c:v", "libx264",
-        "-preset", "fast",
+        "-preset", "medium",
+        "-crf", "27",
+        "-maxrate", "2500k",
+        "-bufsize", "5000k",
         "-pix_fmt", "yuv420p",
         "-c:a", "aac",
+        "-b:a", "128k",
+        "-movflags", "+faststart",
         "-shortest",
         "-y",
         output_path,
@@ -916,6 +921,9 @@ def render_world_canvas(
         ret = proc.wait()
         if ret != 0:
             raise RuntimeError(f"FFmpeg failed with exit code {ret}")
+        if os.path.isfile(output_path):
+            size_mb = os.path.getsize(output_path) / (1024 * 1024)
+            print(f"Encoded MP4 size: {size_mb:.2f} MB ({output_path})")
     except Exception:
         proc.kill()
         proc.wait()
