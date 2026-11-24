@@ -1,6 +1,7 @@
 import os
 from io import BytesIO
 
+import numpy as np
 import requests
 from PIL import Image, ImageDraw, ImageFilter, ImageOps
 
@@ -93,6 +94,20 @@ def create_framed_card(
     return output_path
 
 
+def _has_sufficient_detail(image_path: str) -> bool:
+    """Reject nearly uniform or plain sky/gradient fallback images."""
+    try:
+        gray = Image.open(image_path).convert("L").resize((128, 72))
+        arr = np.asarray(gray, dtype=np.float32)
+        std_val = float(np.std(arr))
+        grad_x = float(np.mean(np.abs(np.diff(arr, axis=1))))
+        grad_y = float(np.mean(np.abs(np.diff(arr, axis=0))))
+        edge_energy = grad_x + grad_y
+        return std_val >= 14.0 and edge_energy >= 3.5
+    except Exception:
+        return False
+
+
 def prepare_chapter_card(
     index: int,
     custom_image_url: str | None,
@@ -112,12 +127,17 @@ def prepare_chapter_card(
     if not fetched:
         for candidate in wiki_candidates:
             print(f"Chapter {index}: searching Wikimedia Commons for '{candidate}'...")
-            fetched = fetch_commons_image(candidate, raw_path, excluded_urls=excluded_urls)
-            if fetched:
-                break
+            candidate_path = fetch_commons_image(candidate, raw_path, excluded_urls=excluded_urls)
+            if candidate_path:
+                if _has_sufficient_detail(candidate_path):
+                    fetched = candidate_path
+                    break
+                print(
+                    f"Chapter {index}: skipping low-detail/sky fallback image for '{candidate}'."
+                )
 
     if not fetched:
-        print(f"WARNING: Chapter {index}: no custom or Wikimedia image available.")
+        print(f"WARNING: Chapter {index}: no custom or detailed Wikimedia image available.")
         return None
 
     return create_framed_card(fetched, card_path, target_size=target_size)

@@ -379,6 +379,39 @@ def parse_json_maybe(value):
         return None
 
 
+_DEVANAGARI_DIGITS = str.maketrans("०१२३४५६७८९", "0123456789")
+
+
+def _extract_stat_target(ch: dict) -> tuple[int, str]:
+    """Extract numeric target and suffix from highlight_stat or marathi_narration."""
+    explicit_val = ch.get("target_value")
+    explicit_suffix = ch.get("suffix")
+    if explicit_val is not None:
+        try:
+            return int(float(explicit_val)), str(explicit_suffix or "%")
+        except (TypeError, ValueError):
+            pass
+
+    for field in (
+        ch.get("highlight_stat"),
+        ch.get("stamp_text"),
+        ch.get("marathi_narration"),
+        ch.get("narration"),
+        ch.get("script"),
+    ):
+        if not field:
+            continue
+        normalized = str(field).translate(_DEVANAGARI_DIGITS)
+        pct_match = re.search(r"(\d{1,4})\s*%", normalized)
+        if pct_match:
+            return int(pct_match.group(1)), "%"
+        num_match = re.search(r"\b(\d{1,4})\b", normalized)
+        if num_match:
+            return int(num_match.group(1)), str(explicit_suffix or "%")
+
+    return 100, str(explicit_suffix or "%")
+
+
 def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
     """Build a valid vector_graphic spec dict from an explicit graphic_type string."""
     gtype = graphic_type.strip().lower()
@@ -411,10 +444,11 @@ def build_vector_graphic_from_type(graphic_type: str, ch: dict) -> dict | None:
         }
 
     if gtype == "stat_counter":
+        target_val, suffix = _extract_stat_target(ch)
         return {
             "type": "stat_counter",
-            "target_value": ch.get("target_value") or 100,
-            "suffix": str(ch.get("suffix") or "%"),
+            "target_value": target_val,
+            "suffix": suffix,
             "subtitle": scene or "शुद्ध आणि नैसर्गिक हमी",
         }
 
@@ -456,9 +490,9 @@ def normalize_chapter(
     highlight_stat = ch.get("highlight_stat") or ch.get("stamp_text")
     graphic_type = ch.get("graphic_type")
     graphic_type_str = str(graphic_type).strip().lower() if graphic_type else None
-    vector_graphic = (
-        ch.get("vector_graphic") if isinstance(ch.get("vector_graphic"), dict) else None
-    )
+    raw_vg = ch.get("vector_graphic") if isinstance(ch.get("vector_graphic"), dict) else None
+    explicit_graphic = bool(raw_vg is not None or graphic_type_str)
+    vector_graphic = raw_vg
     if vector_graphic is None and graphic_type_str:
         vector_graphic = build_vector_graphic_from_type(graphic_type_str, ch)
 
@@ -475,6 +509,7 @@ def normalize_chapter(
         "highlight_stat": str(highlight_stat).strip() if highlight_stat else None,
         "graphic_type": graphic_type_str,
         "vector_graphic": vector_graphic,
+        "explicit_graphic": explicit_graphic,
         "part_number": part_number,
         "series_title": str(series_title).strip() if series_title else None,
         "brand_theme": str(brand_theme).strip() if brand_theme else None,
@@ -966,52 +1001,61 @@ def draw_chapter_card(
 
     loc_text = format_map_location(card.get("map_location"))
     has_map = bool(loc_text)
-    vg_spec = card.get("vector_graphic") if not has_map else None
+    vg_spec = card.get("vector_graphic")
     has_vg = isinstance(vg_spec, dict)
-    has_split = has_map or has_vg
-
-    # Fit framed photo card cleanly in upper/middle zone (split layout if map or vector graphic is present)
     skia_img = card.get("skia_img")
-    if skia_img is not None:
-        img_w, img_h = skia_img.width(), skia_img.height()
-        target_w = (w * 0.54) if has_split else (w * 0.86)
-        target_h = (h * 0.55) if has_split else (h * 0.58)
-        base_scale = min(target_w / img_w, target_h / img_h)
-        zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
-        scale = base_scale * zoom
-        drawn_w = img_w * scale
-        drawn_h = img_h * scale
-        img_x = (-half_w + 48.0 + (target_w - drawn_w) / 2.0) if has_split else (-drawn_w / 2.0)
-        img_y = (-half_h + 98.0 + (target_h - drawn_h) / 2.0) if has_split else (-half_h + 88.0 + (target_h - drawn_h) / 2.0)
-        canvas.save()
-        canvas.translate(img_x, img_y)
-        canvas.scale(scale, scale)
-        canvas.drawImage(
-            skia_img,
-            0,
-            0,
-            skia.SamplingOptions(skia.FilterMode.kLinear),
-        )
-        canvas.restore()
 
-    if has_map and loc_text:
+    card_dur = float(card.get("duration") or 5.0)
+    anim_window = min(4.0, max(0.5, card_dur * 0.75))
+    vg_progress = min(1.0, max(0.0, elapsed_sec / anim_window)) if is_active else 1.0
+    map_progress = min(1.0, max(0.0, elapsed_sec / 1.5)) if is_active else 1.0
+
+    if has_vg and has_map and loc_text:
+        # Co-render explicit vector graphic (left) and map card (right) without overlap
+        vg_w = w * 0.54
+        vg_h = h * 0.53
+        vg_rect = skia.Rect.MakeXYWH(-half_w + 48.0, -half_h + 104.0, vg_w, vg_h)
+        draw_vector_graphic(canvas, vg_rect, vg_spec, vg_progress, font_path)
+
         map_w = w * 0.34
         map_h = h * 0.53
-        map_x = half_w - 48.0 - map_w
-        map_y = -half_h + 104.0
-        map_rect = skia.Rect.MakeXYWH(map_x, map_y, map_w, map_h)
-        map_progress = min(1.0, max(0.0, elapsed_sec / 1.5)) if is_active else 1.0
+        map_rect = skia.Rect.MakeXYWH(half_w - 48.0 - map_w, -half_h + 104.0, map_w, map_h)
         draw_map_card(canvas, map_rect, loc_text, map_progress, font_path)
-    elif has_vg and vg_spec is not None:
-        vg_w = (w * 0.36) if skia_img is not None else (w * 0.78)
-        vg_h = h * 0.53
-        vg_x = (half_w - 48.0 - vg_w) if skia_img is not None else (-vg_w / 2.0)
-        vg_y = -half_h + 104.0
-        vg_rect = skia.Rect.MakeXYWH(vg_x, vg_y, vg_w, vg_h)
-        card_dur = float(card.get("duration") or 5.0)
-        anim_window = min(4.0, max(0.5, card_dur * 0.75))
-        vg_progress = min(1.0, max(0.0, elapsed_sec / anim_window)) if is_active else 1.0
-        draw_vector_graphic(canvas, vg_rect, vg_spec, vg_progress, font_path)
+    else:
+        has_split = has_map or has_vg
+        if skia_img is not None:
+            img_w, img_h = skia_img.width(), skia_img.height()
+            target_w = (w * 0.54) if has_split else (w * 0.86)
+            target_h = (h * 0.55) if has_split else (h * 0.58)
+            base_scale = min(target_w / img_w, target_h / img_h)
+            zoom = 1.0 + (0.04 * local_progress if is_active else 0.0)
+            scale = base_scale * zoom
+            drawn_w = img_w * scale
+            drawn_h = img_h * scale
+            img_x = (-half_w + 48.0 + (target_w - drawn_w) / 2.0) if has_split else (-drawn_w / 2.0)
+            img_y = (-half_h + 98.0 + (target_h - drawn_h) / 2.0) if has_split else (-half_h + 88.0 + (target_h - drawn_h) / 2.0)
+            canvas.save()
+            canvas.translate(img_x, img_y)
+            canvas.scale(scale, scale)
+            canvas.drawImage(
+                skia_img,
+                0,
+                0,
+                skia.SamplingOptions(skia.FilterMode.kLinear),
+            )
+            canvas.restore()
+
+        if has_map and loc_text:
+            map_w = w * 0.34
+            map_h = h * 0.53
+            map_rect = skia.Rect.MakeXYWH(half_w - 48.0 - map_w, -half_h + 104.0, map_w, map_h)
+            draw_map_card(canvas, map_rect, loc_text, map_progress, font_path)
+        elif has_vg and vg_spec is not None:
+            vg_w = (w * 0.36) if skia_img is not None else (w * 0.78)
+            vg_h = h * 0.53
+            vg_x = (half_w - 48.0 - vg_w) if skia_img is not None else (-vg_w / 2.0)
+            vg_rect = skia.Rect.MakeXYWH(vg_x, -half_h + 104.0, vg_w, vg_h)
+            draw_vector_graphic(canvas, vg_rect, vg_spec, vg_progress, font_path)
 
     # Bottom gradient scrim
     scrim_paint = skia.Paint(
@@ -1377,7 +1421,7 @@ def render_world_canvas(
 
 def infer_vector_graphic(chapter: dict) -> dict | None:
     """Auto-infer a clean Skia vector graphic for abstract chapters without explicit specs."""
-    if isinstance(chapter.get("vector_graphic"), dict) or chapter.get("graphic_type"):
+    if chapter.get("explicit_graphic") or isinstance(chapter.get("vector_graphic"), dict) or chapter.get("graphic_type"):
         return chapter.get("vector_graphic")
     if format_map_location(chapter.get("map_location")) or chapter.get("custom_image_url"):
         return None
