@@ -21,6 +21,7 @@ if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
 from make_map import draw_map_card
+from make_sfx import ensure_sfx_assets
 from prep_assets import prepare_chapter_card
 from tts_sarvam import sanitize_tts_text, synthesize_marathi_tts
 
@@ -110,6 +111,60 @@ def build_master_audio(audio_files: list[str], master_path: str) -> str:
     )
     print(f"Built master narration track -> {master_path}")
     return master_path
+
+
+def mix_master_audio(
+    master_narration_path: str,
+    sfx_events: list[tuple[str, float, float]],
+    mix_output_path: str,
+) -> str:
+    """Mix procedural SFX events quietly beneath master_narration.wav via FFmpeg."""
+    if not sfx_events:
+        return master_narration_path
+
+    cmd: list[str] = ["ffmpeg", "-i", master_narration_path]
+    filter_parts: list[str] = ["[0:a]aresample=44100[voice]"]
+    mix_inputs: list[str] = ["[voice]"]
+
+    for idx, (sfx_path, start_sec, vol) in enumerate(sfx_events, start=1):
+        cmd.extend(["-i", sfx_path])
+        delay_ms = max(0, int(round(start_sec * 1000.0)))
+        label = f"s{idx}"
+        filter_parts.append(
+            f"[{idx}:a]aresample=44100,adelay={delay_ms}|{delay_ms},volume={vol:.2f}[{label}]"
+        )
+        mix_inputs.append(f"[{label}]")
+
+    amix_chain = (
+        f"{''.join(mix_inputs)}amix=inputs={len(mix_inputs)}:duration=first"
+        ":dropout_transition=0:normalize=0,loudnorm[outa]"
+    )
+    filter_parts.append(amix_chain)
+
+    cmd.extend(
+        [
+            "-filter_complex",
+            ";".join(filter_parts),
+            "-map",
+            "[outa]",
+            "-ar",
+            "44100",
+            "-ac",
+            "1",
+            "-c:a",
+            "pcm_s16le",
+            "-y",
+            mix_output_path,
+        ]
+    )
+
+    try:
+        subprocess.run(cmd, check=True)
+        print(f"Mixed {len(sfx_events)} SFX event(s) -> {mix_output_path}")
+        return mix_output_path
+    except subprocess.CalledProcessError as exc:
+        print(f"WARNING: SFX audio mix failed ({exc}); using dry narration track.")
+        return master_narration_path
 
 
 def load_skia_image(image_path: str | None) -> skia.Image | None:
@@ -352,12 +407,14 @@ def normalize_chapter(
     )
     map_loc = ch.get("map_location") or ch.get("location") or fallback_map
     custom_img = ch.get("custom_image_url") or ch.get("image_url")
+    highlight_stat = ch.get("highlight_stat") or ch.get("stamp_text")
     return {
         "scene": scene,
         "marathi_narration": narration,
         "wiki_image_search": wiki,
         "map_location": map_loc,
         "custom_image_url": custom_img,
+        "highlight_stat": str(highlight_stat).strip() if highlight_stat else None,
     }
 
 
@@ -875,7 +932,6 @@ def draw_chapter_card(
     )
 
     # Map location badge (top-left)
-    loc_text = format_map_location(card.get("map_location"))
     if loc_text:
         badge_w = measure_shaped_width(loc_text, badge_font, hb_font, upem)
         pill_rect = skia.RRect.MakeRectXY(
@@ -907,6 +963,55 @@ def draw_chapter_card(
             hb_font,
             upem,
         )
+
+    # Kinetic Marathi callout stamp (top-right next to counter pill, enters at 0.5s)
+    stamp_text = card.get("highlight_stat")
+    if stamp_text and (not is_active or elapsed_sec >= 0.5):
+        stamp_t = min(1.0, max(0.0, (elapsed_sec - 0.5) / 0.25)) if is_active else 1.0
+        # Overshoot scale-in (1.35 -> 1.0 over 0.25s)
+        eased_stamp = 1.0 - (1.0 - stamp_t) ** 3
+        overshoot = 0.08 * math.sin(math.pi * stamp_t)
+        stamp_scale = 1.35 - 0.35 * eased_stamp - overshoot
+        stamp_alpha = int(255 * min(1.0, stamp_t * 2.0))
+
+        sw = measure_shaped_width(stamp_text, badge_font, hb_font, upem)
+        pill_w = sw + 52.0
+        pill_h = 52.0
+        stamp_cx = half_w - num_w - 110.0 - pill_w / 2.0
+        stamp_cy = -half_h + 36.0 + pill_h / 2.0
+
+        canvas.save()
+        canvas.translate(stamp_cx, stamp_cy)
+        canvas.rotate(-3.0)
+        canvas.scale(stamp_scale, stamp_scale)
+
+        stamp_rrect = skia.RRect.MakeRectXY(
+            skia.Rect.MakeXYWH(-pill_w / 2.0, -pill_h / 2.0, pill_w, pill_h), 14, 14
+        )
+        canvas.drawRRect(
+            stamp_rrect,
+            skia.Paint(Color=skia.ColorSetARGB(int(235 * stamp_alpha / 255), *theme["accent"]), AntiAlias=True),
+        )
+        canvas.drawRRect(
+            stamp_rrect,
+            skia.Paint(
+                Color=skia.ColorSetARGB(stamp_alpha, 255, 255, 255),
+                Style=skia.Paint.kStroke_Style,
+                StrokeWidth=2.5,
+                AntiAlias=True,
+            ),
+        )
+        draw_shaped_text(
+            canvas,
+            stamp_text,
+            -sw / 2.0,
+            11.0,
+            badge_font,
+            skia.Paint(Color=skia.ColorSetARGB(stamp_alpha, 15, 23, 42), AntiAlias=True),
+            hb_font,
+            upem,
+        )
+        canvas.restore()
 
     # Marathi scene title + synced Marathi caption bar at bottom of card
     caption_chunks: list[list[str]] = card.get("caption_chunks") or []
@@ -1120,6 +1225,53 @@ def render_world_canvas(
         raise
 
 
+def apply_chapter_enhancements(chapters: list[dict], data: dict, script_data: dict) -> None:
+    """Ensure a fallback map_location exists and derive kinetic Marathi stamps when missing."""
+    branding = script_data.get("branding") or data.get("branding") or {}
+    enterprise_name = (
+        str(branding.get("enterprise_name") or "").strip()
+        if isinstance(branding, dict)
+        else ""
+    )
+
+    has_any_map = any(format_map_location(ch.get("map_location")) for ch in chapters)
+    if not has_any_map and chapters:
+        fallback_loc = f"{enterprise_name}, महाराष्ट्र" if enterprise_name else "महाराष्ट्र, भारत"
+        markers = [m for m in (enterprise_name, "महाराष्ट्र", "गोशाळा", "फार्म") if m]
+        target_idx = None
+        for idx, ch in enumerate(chapters):
+            blob = f"{ch.get('scene', '')} {ch.get('marathi_narration', '')}"
+            if any(m in blob for m in markers):
+                target_idx = idx
+                break
+        if target_idx is None:
+            target_idx = 2 if len(chapters) >= 3 else 0
+        chapters[target_idx]["map_location"] = fallback_loc
+        print(f"Assigned fallback map_location to chapter {target_idx}: {fallback_loc!r}")
+
+    auto_stamp_rules = [
+        (("प्रतिजैविकमुक्त", "शंभर टक्के"), "१००% प्रतिजैविकमुक्त"),
+        (("आयुर्वेदिक",), "आयुर्वेदिक पद्धत"),
+        (("a2", "शुद्ध"), "शुद्ध A2 दूध"),
+    ]
+    used_auto_stamps: set[str] = set()
+    auto_count = 0
+    for ch in chapters:
+        if ch.get("highlight_stat"):
+            continue
+        if auto_count >= 3:
+            break
+        narration_lower = str(ch.get("marathi_narration") or "").lower()
+        for tokens, badge in auto_stamp_rules:
+            if badge in used_auto_stamps:
+                continue
+            if any(tok in narration_lower for tok in tokens):
+                ch["highlight_stat"] = badge
+                used_auto_stamps.add(badge)
+                auto_count += 1
+                break
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Render Continuous 2D Cinematic Video")
     parser.add_argument("--payload", required=True)
@@ -1150,6 +1302,7 @@ def main() -> None:
     print(f"Top-level payload keys: {list(payload.keys())}")
 
     data, script_data, chapters, video_title = extract_chapters(payload)
+    apply_chapter_enhancements(chapters, data, script_data)
     theme_name, theme = resolve_theme(data, script_data)
     print(f"Normalized data keys: {list(data.keys())}")
     print(f"Using theme: {theme_name} | Total parsed chapters: {len(chapters)}")
@@ -1174,6 +1327,7 @@ def main() -> None:
         )
         map_location = chapter.get("map_location") or chapter.get("location")
         custom_image_url = chapter.get("custom_image_url") or chapter.get("image_url")
+        highlight_stat = chapter.get("highlight_stat") or chapter.get("stamp_text")
         wiki_query = str(
             chapter.get("wiki_image_search")
             or chapter.get("image_search")
@@ -1184,7 +1338,7 @@ def main() -> None:
         print(
             f"Chapter {i}: keys={list(chapter.keys())}, "
             f"scene={scene_title!r}, narration_chars={len(narration)}, "
-            f"custom_image_url={custom_image_url!r}, "
+            f"custom_image_url={custom_image_url!r}, highlight_stat={highlight_stat!r}, "
             f"wiki_image_search={wiki_query!r}, map_location={map_location!r}"
         )
 
@@ -1213,6 +1367,7 @@ def main() -> None:
                 "scene": scene_title,
                 "narration": narration,
                 "map_location": map_location,
+                "highlight_stat": highlight_stat,
                 "skia_img": skia_img,
                 "start_sec": start_sec,
                 "end_sec": end_sec,
@@ -1222,6 +1377,18 @@ def main() -> None:
     master_audio_path = os.path.join(WORK_DIR, "master_narration.wav")
     build_master_audio(audio_files, master_audio_path)
 
+    # Synthesize and mix procedural SFX beneath narration
+    whoosh_path, stamp_path = ensure_sfx_assets(WORK_DIR)
+    sfx_events: list[tuple[str, float, float]] = []
+    for idx, item in enumerate(timeline_items):
+        if format_map_location(item.get("map_location")) or item.get("highlight_stat"):
+            sfx_events.append((stamp_path, item["start_sec"] + 0.5, 0.20))
+        if idx < len(timeline_items) - 1:
+            sfx_events.append((whoosh_path, max(0.0, item["end_sec"] - 0.6), 0.19))
+
+    master_mix_path = os.path.join(WORK_DIR, "master_mix.wav")
+    final_audio_path = mix_master_audio(master_audio_path, sfx_events, master_mix_path)
+
     # 2. Auto-layout chapter cards onto 2D world canvas
     caption_font = skia.Font(typeface, 32)
     cards = layout_chapter_cards(timeline_items, title_font, caption_font, hb_font, upem)
@@ -1229,7 +1396,7 @@ def main() -> None:
     # 3. Render continuous 30fps 2D world canvas with smooth camera transitions
     render_world_canvas(
         cards=cards,
-        master_audio_path=master_audio_path,
+        master_audio_path=final_audio_path,
         total_duration=cursor_sec,
         theme=theme,
         title_font=title_font,
