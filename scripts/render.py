@@ -179,6 +179,62 @@ def format_map_location(raw_map) -> str | None:
     return text or None
 
 
+TOPIC_PHOTO_REFINEMENTS: list[tuple[tuple[str, ...], list[str]]] = [
+    (
+        ("antibiotic", "medicine", "drug", "injection", "veterinary", "औषध", "अँटिबायोटिक"),
+        ["dairy cow grazing", "veterinarian cow farm", "indian farmer cattle"],
+    ),
+    (
+        ("immune", "health", "healthy", "family", "कुटुंब", "आरोग्य", "रोगप्रतिकार"),
+        ["indian family smiling outdoors", "fresh vegetables fruits market India", "sunrise green farm"],
+    ),
+    (
+        ("ayurvedic", "herbal", "herb", "tulsi", "neem", "आयुर्वेद", "वनस्पती"),
+        ["green medicinal herbs leaves", "tulsi plant leaves", "fresh green leaves nature"],
+    ),
+    (
+        ("milk", "dairy", "cow", "cattle", "दूध", "गाय", "गोठा", "डेअरी"),
+        ["cow in green field", "milk pouring glass", "dairy cow grazing"],
+    ),
+]
+
+
+def refine_photo_queries(
+    wiki_query: str,
+    map_location: str | None,
+    scene_title: str,
+    video_title: str,
+) -> list[str]:
+    """Expand vague/abstract terms into clean photographic Wikimedia search queries."""
+    combined = " ".join(
+        str(part)
+        for part in (wiki_query, scene_title, video_title)
+        if isinstance(part, str) and part.strip()
+    ).lower()
+
+    candidates: list[str] = []
+
+    def _add(q: str | None) -> None:
+        if isinstance(q, str):
+            cleaned = q.strip()
+            if cleaned and cleaned not in candidates:
+                candidates.append(cleaned)
+
+    for triggers, photo_queries in TOPIC_PHOTO_REFINEMENTS:
+        if any(tok in combined for tok in triggers):
+            for pq in photo_queries:
+                _add(pq)
+
+    _add(wiki_query)
+    _add(format_map_location(map_location))
+    _add(scene_title)
+    _add(video_title)
+    _add("dairy cow grazing")
+    _add("Maharashtra agriculture farm")
+    _add("indian farmer agriculture")
+    return candidates
+
+
 def fetch_chapter_image(
     index: int,
     wiki_query: str,
@@ -186,21 +242,8 @@ def fetch_chapter_image(
     scene_title: str,
     video_title: str,
 ) -> skia.Image | None:
-    """Try primary wiki_image_search then domain-relevant fallback queries."""
-    candidates: list[str] = []
-    for raw_q in (
-        wiki_query,
-        format_map_location(map_location),
-        scene_title,
-        video_title,
-        "Maharashtra agriculture farm",
-        "dairy farming India",
-        "Indian farmer agriculture",
-    ):
-        if isinstance(raw_q, str):
-            q = raw_q.strip()
-            if q and q not in candidates:
-                candidates.append(q)
+    """Try refined photographic queries then domain-relevant fallback queries."""
+    candidates = refine_photo_queries(wiki_query, map_location, scene_title, video_title)
 
     img_out = os.path.join(WORK_DIR, f"bg_{index}.png")
     for candidate in candidates:
