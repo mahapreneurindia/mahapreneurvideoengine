@@ -1,6 +1,6 @@
 import argparse
-import base64
 import json
+import math
 import os
 import re
 import subprocess
@@ -8,7 +8,6 @@ import sys
 import urllib.request
 
 import numpy as np
-import requests
 import skia
 from PIL import Image
 
@@ -28,6 +27,47 @@ WIDTH = 1920
 HEIGHT = 1080
 FPS = 30
 WORK_DIR = "/tmp/video-job"
+TRANSITION_SEC = 0.8
+
+THEMES = {
+    "Documentary": {
+        "bg_top": (28, 25, 23),
+        "bg_bottom": (15, 23, 42),
+        "grid_rgba": (255, 248, 235, 16),
+        "path_rgba": (245, 158, 11, 110),
+        "card_bg": (24, 24, 27),
+        "card_border": (245, 158, 11, 160),
+        "accent": (245, 158, 11),
+    },
+    "Product Ad": {
+        "bg_top": (9, 9, 11),
+        "bg_bottom": (17, 24, 39),
+        "grid_rgba": (148, 163, 184, 16),
+        "path_rgba": (56, 189, 248, 120),
+        "card_bg": (15, 23, 42),
+        "card_border": (56, 189, 248, 170),
+        "accent": (56, 189, 248),
+    },
+}
+
+TOPIC_PHOTO_REFINEMENTS: list[tuple[tuple[str, ...], list[str]]] = [
+    (
+        ("antibiotic", "medicine", "drug", "injection", "veterinary", "औषध", "अँटिबायोटिक"),
+        ["dairy cow grazing", "veterinarian cow farm", "indian farmer cattle"],
+    ),
+    (
+        ("immune", "health", "healthy", "family", "कुटुंब", "आरोग्य", "रोगप्रतिकार"),
+        ["indian family smiling outdoors", "fresh vegetables fruits market India", "sunrise green farm"],
+    ),
+    (
+        ("ayurvedic", "herbal", "herb", "tulsi", "neem", "आयुर्वेद", "वनस्पती"),
+        ["green medicinal herbs leaves", "tulsi plant leaves", "fresh green leaves nature"],
+    ),
+    (
+        ("milk", "dairy", "cow", "cattle", "दूध", "गाय", "गोठा", "डेअरी"),
+        ["cow in green field", "milk pouring glass", "dairy cow grazing"],
+    ),
+]
 
 
 def get_sarvam_audio(text: str, index: int, api_key: str) -> str:
@@ -51,6 +91,24 @@ def get_audio_duration(audio_path: str) -> float:
         audio_path,
     ]
     return float(subprocess.check_output(dur_cmd).decode("utf-8").strip())
+
+
+def build_master_audio(audio_files: list[str], master_path: str) -> str:
+    """Concatenate all chapter WAVs into one uniform master narration track."""
+    list_file = os.path.join(WORK_DIR, "master_audio_list.txt")
+    with open(list_file, "w", encoding="utf-8") as f:
+        for af in audio_files:
+            f.write(f"file '{os.path.abspath(af)}'\n")
+
+    subprocess.run(
+        [
+            "ffmpeg", "-f", "concat", "-safe", "0", "-i", list_file,
+            "-ar", "22050", "-ac", "1", "-c:a", "pcm_s16le", "-y", master_path,
+        ],
+        check=True,
+    )
+    print(f"Built master narration track -> {master_path}")
+    return master_path
 
 
 def load_skia_image(image_path: str | None) -> skia.Image | None:
@@ -179,26 +237,6 @@ def format_map_location(raw_map) -> str | None:
     return text or None
 
 
-TOPIC_PHOTO_REFINEMENTS: list[tuple[tuple[str, ...], list[str]]] = [
-    (
-        ("antibiotic", "medicine", "drug", "injection", "veterinary", "औषध", "अँटिबायोटिक"),
-        ["dairy cow grazing", "veterinarian cow farm", "indian farmer cattle"],
-    ),
-    (
-        ("immune", "health", "healthy", "family", "कुटुंब", "आरोग्य", "रोगप्रतिकार"),
-        ["indian family smiling outdoors", "fresh vegetables fruits market India", "sunrise green farm"],
-    ),
-    (
-        ("ayurvedic", "herbal", "herb", "tulsi", "neem", "आयुर्वेद", "वनस्पती"),
-        ["green medicinal herbs leaves", "tulsi plant leaves", "fresh green leaves nature"],
-    ),
-    (
-        ("milk", "dairy", "cow", "cattle", "दूध", "गाय", "गोठा", "डेअरी"),
-        ["cow in green field", "milk pouring glass", "dairy cow grazing"],
-    ),
-]
-
-
 def refine_photo_queries(
     wiki_query: str,
     map_location: str | None,
@@ -256,234 +294,6 @@ def fetch_chapter_image(
 
     print(f"WARNING: Chapter {index}: no Wikimedia Commons image found for candidates {candidates}")
     return None
-
-
-def render_chapter_clip(
-    index: int,
-    scene_title: str,
-    wiki_query: str,
-    map_location: str | None,
-    video_title: str,
-    audio_file: str,
-    duration: float,
-    typeface: skia.Typeface,
-    hb_font,
-    upem: int,
-) -> str:
-    """Fetch visuals and render a Skia-animated panning chapter clip synced to audio duration."""
-    clip_file = os.path.join(WORK_DIR, f"clip_{index}.mp4")
-    total_frames = max(1, int(round(duration * FPS)))
-
-    skia_img = fetch_chapter_image(
-        index=index,
-        wiki_query=wiki_query,
-        map_location=map_location,
-        scene_title=scene_title,
-        video_title=video_title,
-    )
-
-    info = skia.ImageInfo.Make(
-        WIDTH, HEIGHT, skia.kRGBA_8888_ColorType, skia.kPremul_AlphaType
-    )
-    surface = skia.Surface.MakeRaster(info)
-
-    title_font = skia.Font(typeface, 68)
-    badge_font = skia.Font(typeface, 32)
-    title_lines = wrap_text(scene_title, title_font, WIDTH - 240, hb_font, upem)
-
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-f", "rawvideo",
-        "-pix_fmt", "rgba",
-        "-s", f"{WIDTH}x{HEIGHT}",
-        "-r", str(FPS),
-        "-i", "-",
-        "-i", audio_file,
-        "-c:v", "libx264",
-        "-preset", "fast",
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-shortest",
-        "-y",
-        clip_file,
-    ]
-
-    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
-    assert proc.stdin is not None
-
-    pan_direction = 1 if index % 2 == 0 else -1
-
-    try:
-        for frame_idx in range(total_frames):
-            t = frame_idx / max(1, total_frames - 1)
-            eased = t * t * (3.0 - 2.0 * t)
-
-            canvas = surface.getCanvas()
-            canvas.clear(skia.ColorSetRGB(15, 23, 42))
-
-            if skia_img is not None:
-                img_w, img_h = skia_img.width(), skia_img.height()
-                base_scale = max(WIDTH / img_w, HEIGHT / img_h)
-                zoom = 1.08 + 0.10 * eased
-                scale = base_scale * zoom
-                drawn_w = img_w * scale
-                drawn_h = img_h * scale
-
-                extra_x = max(0.0, drawn_w - WIDTH)
-                extra_y = max(0.0, drawn_h - HEIGHT)
-                pan_progress = eased if pan_direction > 0 else (1.0 - eased)
-                offset_x = -extra_x * pan_progress
-                offset_y = -extra_y * 0.5
-
-                canvas.save()
-                canvas.translate(offset_x, offset_y)
-                canvas.scale(scale, scale)
-                canvas.drawImage(
-                    skia_img,
-                    0,
-                    0,
-                    skia.SamplingOptions(skia.FilterMode.kLinear),
-                )
-                canvas.restore()
-            else:
-                bg_paint = skia.Paint(
-                    Shader=skia.GradientShader.MakeLinear(
-                        points=[(0, 0), (WIDTH, HEIGHT)],
-                        colors=[
-                            skia.ColorSetRGB(15, 23, 42),
-                            skia.ColorSetRGB(30, 58, 138),
-                        ],
-                    )
-                )
-                canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), bg_paint)
-
-            # Bottom gradient scrim for text readability
-            scrim_paint = skia.Paint(
-                Shader=skia.GradientShader.MakeLinear(
-                    points=[(0, HEIGHT * 0.45), (0, HEIGHT)],
-                    colors=[
-                        skia.ColorSetARGB(0, 0, 0, 0),
-                        skia.ColorSetARGB(220, 2, 6, 23),
-                    ],
-                )
-            )
-            canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), scrim_paint)
-
-            # Optional map location badge with geometric pin icon
-            loc_text = format_map_location(map_location)
-            if loc_text:
-                badge_w = measure_shaped_width(loc_text, badge_font, hb_font, upem)
-                pill_rect = skia.RRect.MakeRectXY(
-                    skia.Rect.MakeXYWH(72, 64, badge_w + 84, 58), 29, 29
-                )
-                pill_paint = skia.Paint(
-                    Color=skia.ColorSetARGB(210, 15, 23, 42), AntiAlias=True
-                )
-                canvas.drawRRect(pill_rect, pill_paint)
-
-                pill_border = skia.Paint(
-                    Color=skia.ColorSetARGB(90, 255, 255, 255),
-                    Style=skia.Paint.kStroke_Style,
-                    StrokeWidth=2.0,
-                    AntiAlias=True,
-                )
-                canvas.drawRRect(pill_rect, pill_border)
-
-                pin_paint = skia.Paint(
-                    Color=skia.ColorSetRGB(239, 68, 68), AntiAlias=True
-                )
-                canvas.drawCircle(104, 93, 10, pin_paint)
-                pin_inner = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
-                canvas.drawCircle(104, 93, 4, pin_inner)
-
-                badge_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
-                draw_shaped_text(
-                    canvas, loc_text, 128, 104, badge_font, badge_paint, hb_font, upem
-                )
-
-            # Rounded card container with comfortable margins around the Marathi scene title
-            text_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
-            line_height = 84
-            line_widths = [
-                measure_shaped_width(line, title_font, hb_font, upem)
-                for line in title_lines
-            ]
-            max_line_w = max(line_widths) if line_widths else 0.0
-            card_pad_x = 56.0
-            card_pad_y = 32.0
-            card_w = min(WIDTH - 120.0, max_line_w + card_pad_x * 2)
-            card_h = len(title_lines) * line_height + card_pad_y * 2
-            card_x = (WIDTH - card_w) / 2.0
-            card_y = HEIGHT - 72.0 - card_h
-
-            card_rect = skia.RRect.MakeRectXY(
-                skia.Rect.MakeXYWH(card_x, card_y, card_w, card_h), 24, 24
-            )
-            card_bg = skia.Paint(
-                Color=skia.ColorSetARGB(195, 15, 23, 42), AntiAlias=True
-            )
-            canvas.drawRRect(card_rect, card_bg)
-            card_border = skia.Paint(
-                Color=skia.ColorSetARGB(80, 255, 255, 255),
-                Style=skia.Paint.kStroke_Style,
-                StrokeWidth=2.0,
-                AntiAlias=True,
-            )
-            canvas.drawRRect(card_rect, card_border)
-
-            start_y = card_y + card_pad_y + 62.0
-            for line_idx, line in enumerate(title_lines):
-                line_w = line_widths[line_idx]
-                x = (WIDTH - line_w) / 2.0
-                y = start_y + line_idx * line_height
-                draw_shaped_text(
-                    canvas, line, x, y, title_font, text_paint, hb_font, upem
-                )
-
-            frame_bytes = surface.toarray().tobytes()
-            proc.stdin.write(frame_bytes)
-
-        proc.stdin.close()
-        ret = proc.wait()
-        if ret != 0:
-            raise RuntimeError(f"FFmpeg failed for chapter {index} with exit code {ret}")
-    except Exception:
-        proc.kill()
-        proc.wait()
-        raise
-
-    return clip_file
-
-
-def split_script_into_chapters(
-    script_text: str,
-    title: str,
-    wiki_search: str,
-    map_location: str | None,
-) -> list[dict]:
-    """Split a plain script string into narrative segments so long scripts are not collapsed."""
-    segments = [s.strip() for s in re.split(r"\n+", script_text) if s.strip()]
-    if len(segments) <= 1:
-        segments = [
-            s.strip()
-            for s in re.split(r"(?<=[।.!?])\s+", script_text.strip())
-            if s.strip()
-        ]
-    if not segments:
-        return []
-
-    chapters: list[dict] = []
-    for idx, seg in enumerate(segments):
-        scene_label = title if len(segments) == 1 else f"{title} ({idx + 1}/{len(segments)})"
-        chapters.append(
-            {
-                "scene": scene_label,
-                "marathi_narration": seg,
-                "wiki_image_search": wiki_search,
-                "map_location": map_location,
-            }
-        )
-    return chapters
 
 
 def parse_json_maybe(value):
@@ -572,9 +382,7 @@ def expand_nested_chapters(raw_chapters: list[dict]) -> list[dict]:
 
         parsed = parse_json_maybe(raw_narration)
         if isinstance(parsed, dict) and isinstance(parsed.get("chapters"), list) and parsed["chapters"]:
-            print(
-                f"Unwrapped {len(parsed['chapters'])} nested chapter(s) from narration JSON."
-            )
+            print(f"Unwrapped {len(parsed['chapters'])} nested chapter(s) from narration JSON.")
             for inner in parsed["chapters"]:
                 if isinstance(inner, dict):
                     expanded.append(
@@ -592,7 +400,38 @@ def expand_nested_chapters(raw_chapters: list[dict]) -> list[dict]:
     return expanded
 
 
-def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
+def split_script_into_chapters(
+    script_text: str,
+    title: str,
+    wiki_search: str,
+    map_location: str | None,
+) -> list[dict]:
+    """Split a plain script string into narrative segments so long scripts are not collapsed."""
+    segments = [s.strip() for s in re.split(r"\n+", script_text) if s.strip()]
+    if len(segments) <= 1:
+        segments = [
+            s.strip()
+            for s in re.split(r"(?<=[।.!?])\s+", script_text.strip())
+            if s.strip()
+        ]
+    if not segments:
+        return []
+
+    chapters: list[dict] = []
+    for idx, seg in enumerate(segments):
+        scene_label = title if len(segments) == 1 else f"{title} ({idx + 1}/{len(segments)})"
+        chapters.append(
+            {
+                "scene": scene_label,
+                "marathi_narration": seg,
+                "wiki_image_search": wiki_search,
+                "map_location": map_location,
+            }
+        )
+    return chapters
+
+
+def extract_chapters(payload: dict) -> tuple[dict, dict, list[dict], str]:
     """Normalize nested/flat payloads (including script_data) and extract chapters."""
     client_payload = parse_json_maybe(payload.get("client_payload"))
     data = client_payload if isinstance(client_payload, dict) else payload
@@ -618,7 +457,7 @@ def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
     if isinstance(parsed_chapters, list) and parsed_chapters:
         expanded = expand_nested_chapters(parsed_chapters)
         if expanded:
-            return data, expanded, video_title
+            return data, script_data, expanded, video_title
 
     print(
         f"WARNING: 'chapters' list missing or empty. "
@@ -643,7 +482,7 @@ def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
         expanded = expand_nested_chapters(parsed_fallback["chapters"])
         if expanded:
             print(f"Unwrapped {len(expanded)} chapter(s) from fallback script JSON.")
-            return data, expanded, video_title
+            return data, script_data, expanded, video_title
 
     wiki_search = str(
         script_data.get("wiki_image_search")
@@ -664,10 +503,11 @@ def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
         )
         if split_chapters:
             print(f"Split fallback script into {len(split_chapters)} chapter(s).")
-            return data, split_chapters, video_title
+            return data, script_data, split_chapters, video_title
 
     return (
         data,
+        script_data,
         [
             {
                 "scene": video_title,
@@ -680,8 +520,410 @@ def extract_chapters(payload: dict) -> tuple[dict, list[dict], str]:
     )
 
 
+def resolve_theme(data: dict, script_data: dict) -> tuple[str, dict]:
+    """Select visual theme from script_data.branding.theme or fallback to Documentary."""
+    branding = script_data.get("branding") or data.get("branding") or {}
+    if isinstance(branding, dict):
+        theme_name = str(branding.get("theme") or "").strip()
+    else:
+        theme_name = ""
+    if theme_name not in THEMES:
+        theme_name = "Documentary"
+    return theme_name, THEMES[theme_name]
+
+
+def layout_chapter_cards(
+    timeline_items: list[dict],
+    title_font: skia.Font,
+    hb_font,
+    upem: int,
+) -> list[dict]:
+    """Arrange chapter cards on a 2D virtual world canvas with spacing and tilt."""
+    card_w = 1600.0
+    card_h = 900.0
+    col_step = 2050.0
+    row_step = 1320.0
+    rotations = [-1.8, 1.4, -1.2, 1.6, -1.5, 1.2]
+
+    cards: list[dict] = []
+    for idx, item in enumerate(timeline_items):
+        row = idx // 2
+        col = idx % 2 if row % 2 == 0 else (1 - (idx % 2))
+        jitter_x = 120.0 if idx % 3 == 1 else (-80.0 if idx % 3 == 2 else 0.0)
+        jitter_y = 90.0 if idx % 2 == 1 else -60.0
+        cx = 1100.0 + col * col_step + jitter_x
+        cy = 750.0 + row * row_step + jitter_y
+        angle = rotations[idx % len(rotations)]
+        title_lines = wrap_text(item["scene"], title_font, card_w - 180.0, hb_font, upem)
+
+        cards.append(
+            {
+                **item,
+                "cx": cx,
+                "cy": cy,
+                "w": card_w,
+                "h": card_h,
+                "angle": angle,
+                "title_lines": title_lines,
+            }
+        )
+    return cards
+
+
+def draw_world_background(
+    canvas: skia.Canvas,
+    cam_x: float,
+    cam_y: float,
+    cam_zoom: float,
+    theme: dict,
+    cards: list[dict],
+) -> None:
+    """Draw themed 2D board backdrop, subtle grid, and connector path between cards."""
+    half_w = (WIDTH / 2.0) / max(0.2, cam_zoom) + 400.0
+    half_h = (HEIGHT / 2.0) / max(0.2, cam_zoom) + 400.0
+    left = cam_x - half_w
+    top = cam_y - half_h
+    right = cam_x + half_w
+    bottom = cam_y + half_h
+
+    bg_paint = skia.Paint(
+        Shader=skia.GradientShader.MakeLinear(
+            points=[(left, top), (right, bottom)],
+            colors=[
+                skia.ColorSetRGB(*theme["bg_top"]),
+                skia.ColorSetRGB(*theme["bg_bottom"]),
+            ],
+        )
+    )
+    canvas.drawRect(skia.Rect.MakeLTRB(left, top, right, bottom), bg_paint)
+
+    grid_paint = skia.Paint(
+        Color=skia.ColorSetARGB(*theme["grid_rgba"]),
+        StrokeWidth=2.0,
+        AntiAlias=True,
+    )
+    step = 160
+    start_gx = int(math.floor(left / step) * step)
+    start_gy = int(math.floor(top / step) * step)
+    for gx in range(start_gx, int(right) + step, step):
+        canvas.drawLine(gx, top, gx, bottom, grid_paint)
+    for gy in range(start_gy, int(bottom) + step, step):
+        canvas.drawLine(left, gy, right, gy, grid_paint)
+
+    if len(cards) > 1:
+        path_paint = skia.Paint(
+            Color=skia.ColorSetARGB(*theme["path_rgba"]),
+            Style=skia.Paint.kStroke_Style,
+            StrokeWidth=6.0,
+            AntiAlias=True,
+        )
+        for i in range(len(cards) - 1):
+            canvas.drawLine(
+                cards[i]["cx"],
+                cards[i]["cy"],
+                cards[i + 1]["cx"],
+                cards[i + 1]["cy"],
+                path_paint,
+            )
+
+
+def draw_chapter_card(
+    canvas: skia.Canvas,
+    card: dict,
+    total_cards: int,
+    theme: dict,
+    is_active: bool,
+    local_progress: float,
+    title_font: skia.Font,
+    badge_font: skia.Font,
+    hb_font,
+    upem: int,
+) -> None:
+    """Draw a single chapter card on the 2D world canvas."""
+    w, h = card["w"], card["h"]
+    half_w, half_h = w / 2.0, h / 2.0
+    card_rect = skia.Rect.MakeXYWH(-half_w, -half_h, w, h)
+    rrect = skia.RRect.MakeRectXY(card_rect, 28, 28)
+
+    canvas.save()
+    canvas.translate(card["cx"], card["cy"])
+    canvas.rotate(card["angle"])
+
+    # Soft drop shadow
+    shadow_rect = skia.RRect.MakeRectXY(
+        skia.Rect.MakeXYWH(-half_w + 18, -half_h + 24, w, h), 28, 28
+    )
+    shadow_paint = skia.Paint(Color=skia.ColorSetARGB(135, 0, 0, 0), AntiAlias=True)
+    canvas.drawRRect(shadow_rect, shadow_paint)
+
+    # Clip card interior
+    canvas.save()
+    canvas.clipRRect(rrect, doAntiAlias=True)
+
+    skia_img = card.get("skia_img")
+    if skia_img is not None:
+        img_w, img_h = skia_img.width(), skia_img.height()
+        base_scale = max(w / img_w, h / img_h)
+        zoom = 1.04 + (0.06 * local_progress if is_active else 0.0)
+        scale = base_scale * zoom
+        drawn_w = img_w * scale
+        drawn_h = img_h * scale
+        canvas.save()
+        canvas.translate(-drawn_w / 2.0, -drawn_h / 2.0)
+        canvas.scale(scale, scale)
+        canvas.drawImage(
+            skia_img,
+            0,
+            0,
+            skia.SamplingOptions(skia.FilterMode.kLinear),
+        )
+        canvas.restore()
+    else:
+        fill_paint = skia.Paint(Color=skia.ColorSetRGB(*theme["card_bg"]), AntiAlias=True)
+        canvas.drawRect(card_rect, fill_paint)
+
+    # Bottom gradient scrim
+    scrim_paint = skia.Paint(
+        Shader=skia.GradientShader.MakeLinear(
+            points=[(0, 0), (0, half_h)],
+            colors=[
+                skia.ColorSetARGB(0, 0, 0, 0),
+                skia.ColorSetARGB(225, 2, 6, 23),
+            ],
+        )
+    )
+    canvas.drawRect(card_rect, scrim_paint)
+
+    # Chapter number badge (top-right)
+    num_text = f"{card['index'] + 1:02d} / {total_cards:02d}"
+    num_w = measure_shaped_width(num_text, badge_font, hb_font, upem)
+    num_pill = skia.RRect.MakeRectXY(
+        skia.Rect.MakeXYWH(half_w - num_w - 84, -half_h + 36, num_w + 48, 52), 26, 26
+    )
+    canvas.drawRRect(
+        num_pill,
+        skia.Paint(Color=skia.ColorSetARGB(200, 15, 23, 42), AntiAlias=True),
+    )
+    draw_shaped_text(
+        canvas,
+        num_text,
+        half_w - num_w - 60,
+        -half_h + 73,
+        badge_font,
+        skia.Paint(Color=skia.ColorSetRGB(*theme["accent"]), AntiAlias=True),
+        hb_font,
+        upem,
+    )
+
+    # Map location badge (top-left)
+    loc_text = format_map_location(card.get("map_location"))
+    if loc_text:
+        badge_w = measure_shaped_width(loc_text, badge_font, hb_font, upem)
+        pill_rect = skia.RRect.MakeRectXY(
+            skia.Rect.MakeXYWH(-half_w + 36, -half_h + 36, badge_w + 80, 52), 26, 26
+        )
+        canvas.drawRRect(
+            pill_rect,
+            skia.Paint(Color=skia.ColorSetARGB(205, 15, 23, 42), AntiAlias=True),
+        )
+        canvas.drawCircle(
+            -half_w + 66,
+            -half_h + 62,
+            9,
+            skia.Paint(Color=skia.ColorSetRGB(239, 68, 68), AntiAlias=True),
+        )
+        canvas.drawCircle(
+            -half_w + 66,
+            -half_h + 62,
+            3.5,
+            skia.Paint(Color=skia.ColorWHITE, AntiAlias=True),
+        )
+        draw_shaped_text(
+            canvas,
+            loc_text,
+            -half_w + 88,
+            -half_h + 73,
+            badge_font,
+            skia.Paint(Color=skia.ColorWHITE, AntiAlias=True),
+            hb_font,
+            upem,
+        )
+
+    # Rounded title container at bottom of card
+    title_lines = card["title_lines"]
+    line_height = 76.0
+    line_widths = [
+        measure_shaped_width(line, title_font, hb_font, upem) for line in title_lines
+    ]
+    max_lw = max(line_widths) if line_widths else 0.0
+    pad_x, pad_y = 44.0, 26.0
+    box_w = min(w - 96.0, max_lw + pad_x * 2)
+    box_h = len(title_lines) * line_height + pad_y * 2
+    box_x = -box_w / 2.0
+    box_y = half_h - 44.0 - box_h
+    box_rrect = skia.RRect.MakeRectXY(
+        skia.Rect.MakeXYWH(box_x, box_y, box_w, box_h), 20, 20
+    )
+    canvas.drawRRect(
+        box_rrect,
+        skia.Paint(Color=skia.ColorSetARGB(195, 15, 23, 42), AntiAlias=True),
+    )
+
+    text_paint = skia.Paint(Color=skia.ColorWHITE, AntiAlias=True)
+    start_y = box_y + pad_y + 54.0
+    for li, line in enumerate(title_lines):
+        lx = -line_widths[li] / 2.0
+        ly = start_y + li * line_height
+        draw_shaped_text(canvas, line, lx, ly, title_font, text_paint, hb_font, upem)
+
+    canvas.restore()  # End card clip
+
+    border_color = (
+        skia.ColorSetARGB(*theme["card_border"])
+        if is_active
+        else skia.ColorSetARGB(70, 255, 255, 255)
+    )
+    border_paint = skia.Paint(
+        Color=border_color,
+        Style=skia.Paint.kStroke_Style,
+        StrokeWidth=4.0 if is_active else 2.0,
+        AntiAlias=True,
+    )
+    canvas.drawRRect(rrect, border_paint)
+    canvas.restore()
+
+
+def compute_camera_state(cards: list[dict], t_sec: float) -> tuple[int, float, float, float, float]:
+    """Compute (active_idx, cam_x, cam_y, cam_zoom, local_progress) at time t_sec."""
+    active_idx = len(cards) - 1
+    for i, card in enumerate(cards):
+        if card["start_sec"] <= t_sec < card["end_sec"]:
+            active_idx = i
+            break
+
+    curr = cards[active_idx]
+    dur = max(0.01, curr["end_sec"] - curr["start_sec"])
+    local_progress = max(0.0, min(1.0, (t_sec - curr["start_sec"]) / dur))
+
+    cam_x = curr["cx"]
+    cam_y = curr["cy"]
+    cam_zoom = 1.08 + 0.04 * local_progress
+
+    if active_idx < len(cards) - 1 and dur > TRANSITION_SEC:
+        trans_start = curr["end_sec"] - TRANSITION_SEC
+        if t_sec >= trans_start:
+            nxt = cards[active_idx + 1]
+            u = max(0.0, min(1.0, (t_sec - trans_start) / TRANSITION_SEC))
+            eased = u * u * (3.0 - 2.0 * u)
+            cam_x = curr["cx"] + (nxt["cx"] - curr["cx"]) * eased
+            cam_y = curr["cy"] + (nxt["cy"] - curr["cy"]) * eased
+            zoom_dip = 0.22 * math.sin(math.pi * u)
+            cam_zoom = 1.12 - zoom_dip
+
+    return active_idx, cam_x, cam_y, cam_zoom, local_progress
+
+
+def render_world_canvas(
+    cards: list[dict],
+    master_audio_path: str,
+    total_duration: float,
+    theme: dict,
+    title_font: skia.Font,
+    badge_font: skia.Font,
+    hb_font,
+    upem: int,
+    output_path: str,
+) -> None:
+    """Render all chapters on one continuous 2D world canvas piped to FFmpeg."""
+    total_frames = max(1, int(round(total_duration * FPS)))
+    info = skia.ImageInfo.Make(
+        WIDTH, HEIGHT, skia.kRGBA_8888_ColorType, skia.kPremul_AlphaType
+    )
+    surface = skia.Surface.MakeRaster(info)
+
+    spotlight_paint = skia.Paint(
+        Shader=skia.GradientShader.MakeRadial(
+            center=(WIDTH / 2.0, HEIGHT / 2.0),
+            radius=WIDTH * 0.68,
+            colors=[
+                skia.ColorSetARGB(0, 0, 0, 0),
+                skia.ColorSetARGB(155, 2, 6, 23),
+            ],
+            positions=[0.55, 1.0],
+        )
+    )
+
+    os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-f", "rawvideo",
+        "-pix_fmt", "rgba",
+        "-s", f"{WIDTH}x{HEIGHT}",
+        "-r", str(FPS),
+        "-i", "-",
+        "-i", master_audio_path,
+        "-c:v", "libx264",
+        "-preset", "fast",
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac",
+        "-shortest",
+        "-y",
+        output_path,
+    ]
+
+    proc = subprocess.Popen(ffmpeg_cmd, stdin=subprocess.PIPE)
+    assert proc.stdin is not None
+
+    try:
+        for frame_idx in range(total_frames):
+            t_sec = frame_idx / float(FPS)
+            active_idx, cam_x, cam_y, cam_zoom, local_progress = compute_camera_state(
+                cards, t_sec
+            )
+
+            canvas = surface.getCanvas()
+            canvas.clear(skia.ColorSetRGB(*theme["bg_bottom"]))
+
+            canvas.save()
+            canvas.translate(WIDTH / 2.0, HEIGHT / 2.0)
+            canvas.scale(cam_zoom, cam_zoom)
+            canvas.translate(-cam_x, -cam_y)
+
+            draw_world_background(canvas, cam_x, cam_y, cam_zoom, theme, cards)
+
+            for idx, card in enumerate(cards):
+                draw_chapter_card(
+                    canvas=canvas,
+                    card=card,
+                    total_cards=len(cards),
+                    theme=theme,
+                    is_active=(idx == active_idx),
+                    local_progress=local_progress if idx == active_idx else 0.0,
+                    title_font=title_font,
+                    badge_font=badge_font,
+                    hb_font=hb_font,
+                    upem=upem,
+                )
+
+            canvas.restore()
+
+            # Soft radial spotlight / vignette keeping focus on active card
+            canvas.drawRect(skia.Rect.MakeWH(WIDTH, HEIGHT), spotlight_paint)
+
+            proc.stdin.write(surface.toarray().tobytes())
+
+        proc.stdin.close()
+        ret = proc.wait()
+        if ret != 0:
+            raise RuntimeError(f"FFmpeg failed with exit code {ret}")
+    except Exception:
+        proc.kill()
+        proc.wait()
+        raise
+
+
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Render Cinematic Explainer Video")
+    parser = argparse.ArgumentParser(description="Render Continuous 2D Cinematic Video")
     parser.add_argument("--payload", required=True)
     parser.add_argument("--output", required=True)
     args = parser.parse_args()
@@ -699,6 +941,8 @@ def main() -> None:
 
     typeface = skia.Typeface.MakeFromFile(font_path) or skia.Typeface.MakeDefault()
     hb_font, upem = create_hb_font(font_path)
+    title_font = skia.Font(typeface, 58)
+    badge_font = skia.Font(typeface, 30)
 
     with open(args.payload, "r", encoding="utf-8") as f:
         payload = json.load(f)
@@ -707,17 +951,19 @@ def main() -> None:
     print(json.dumps(payload, indent=2, ensure_ascii=False))
     print(f"Top-level payload keys: {list(payload.keys())}")
 
-    data, chapters, video_title = extract_chapters(payload)
+    data, script_data, chapters, video_title = extract_chapters(payload)
+    theme_name, theme = resolve_theme(data, script_data)
     print(f"Normalized data keys: {list(data.keys())}")
-    print(f"Total parsed chapters: {len(chapters)}")
+    print(f"Using theme: {theme_name} | Total parsed chapters: {len(chapters)}")
 
-    clip_paths: list[str] = []
+    # 1. Synthesize all chapter audio tracks and build master timeline
+    audio_files: list[str] = []
+    timeline_items: list[dict] = []
+    cursor_sec = 0.0
 
     for i, chapter in enumerate(chapters):
         scene_title = str(
-            chapter.get("scene")
-            or chapter.get("title")
-            or f"प्रकरण {i + 1}"
+            chapter.get("scene") or chapter.get("title") or f"प्रकरण {i + 1}"
         )
         narration = str(
             chapter.get("marathi_narration")
@@ -739,41 +985,53 @@ def main() -> None:
             f"wiki_image_search={wiki_query!r}, map_location={map_location!r}"
         )
 
-        # 1. Generate Voiceover Audio via Sarvam AI
         audio_file = get_sarvam_audio(narration, i, api_key)
-
-        # 2. Measure Audio Duration
         duration = get_audio_duration(audio_file)
-        print(f"Chapter {i}: audio duration = {duration:.2f}s")
+        audio_files.append(audio_file)
 
-        # 3. Render Skia panning canvas synced to audio duration
-        clip_file = render_chapter_clip(
+        skia_img = fetch_chapter_image(
             index=i,
-            scene_title=scene_title,
             wiki_query=wiki_query,
             map_location=map_location,
+            scene_title=scene_title,
             video_title=video_title,
-            audio_file=audio_file,
-            duration=duration,
-            typeface=typeface,
-            hb_font=hb_font,
-            upem=upem,
         )
-        clip_paths.append(clip_file)
 
-    # 4. Stitch scenes together
-    list_file = os.path.join(WORK_DIR, "concat_list.txt")
-    with open(list_file, "w", encoding="utf-8") as f:
-        for clip in clip_paths:
-            f.write(f"file '{os.path.abspath(clip)}'\n")
+        start_sec = cursor_sec
+        end_sec = cursor_sec + duration
+        cursor_sec = end_sec
+        print(f"Chapter {i}: timeline [{start_sec:.2f}s -> {end_sec:.2f}s] ({duration:.2f}s)")
 
-    os.makedirs(os.path.dirname(os.path.abspath(args.output)), exist_ok=True)
-    concat_cmd = [
-        "ffmpeg", "-f", "concat", "-safe", "0",
-        "-i", list_file, "-c", "copy", "-y", args.output,
-    ]
-    subprocess.run(concat_cmd, check=True)
-    print(f"Final explainer video saved to {args.output}")
+        timeline_items.append(
+            {
+                "index": i,
+                "scene": scene_title,
+                "map_location": map_location,
+                "skia_img": skia_img,
+                "start_sec": start_sec,
+                "end_sec": end_sec,
+            }
+        )
+
+    master_audio_path = os.path.join(WORK_DIR, "master_narration.wav")
+    build_master_audio(audio_files, master_audio_path)
+
+    # 2. Auto-layout chapter cards onto 2D world canvas
+    cards = layout_chapter_cards(timeline_items, title_font, hb_font, upem)
+
+    # 3. Render continuous 30fps 2D world canvas with smooth camera transitions
+    render_world_canvas(
+        cards=cards,
+        master_audio_path=master_audio_path,
+        total_duration=cursor_sec,
+        theme=theme,
+        title_font=title_font,
+        badge_font=badge_font,
+        hb_font=hb_font,
+        upem=upem,
+        output_path=args.output,
+    )
+    print(f"Final continuous 2D explainer video saved to {args.output}")
 
 
 if __name__ == "__main__":
