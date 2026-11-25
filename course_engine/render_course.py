@@ -44,7 +44,12 @@ def _post_webhook(
 ) -> None:
     if not callback_url:
         return
-    secret = (webhook_secret or os.environ.get("VIDEO_WEBHOOK_SECRET", "")).strip()
+    secret = (
+        webhook_secret
+        or os.getenv("WEBHOOK_SECRET")
+        or os.getenv("VIDEO_WEBHOOK_SECRET")
+        or ""
+    ).strip()
     headers = {"Content-Type": "application/json"}
     if secret:
         headers["x-webhook-secret"] = secret
@@ -132,16 +137,16 @@ def _build_lesson_audio(
 
 
 def _upload_to_supabase(local_mp4: str, object_path: str) -> str:
-    supabase_url = os.environ.get("SUPABASE_URL", "").rstrip("/")
+    supabase_url = (os.getenv("SUPABASE_URL") or "").rstrip("/")
     service_key = (
-        os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-        or os.environ.get("SUPABASE_SERVICE_KEY")
+        os.getenv("SUPABASE_SERVICE_KEY")
+        or os.getenv("SUPABASE_SERVICE_ROLE_KEY")
         or ""
     ).strip()
-    bucket = os.environ.get("SUPABASE_STORAGE_BUCKET", "videos").strip() or "videos"
+    bucket = (os.getenv("SUPABASE_STORAGE_BUCKET") or "videos").strip() or "videos"
 
     if not supabase_url or not service_key:
-        raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_ROLE_KEY is missing.")
+        raise RuntimeError("SUPABASE_URL or SUPABASE_SERVICE_KEY is missing.")
 
     endpoint = f"{supabase_url}/storage/v1/object/{bucket}/{object_path}"
     headers = {
@@ -172,8 +177,17 @@ def main() -> None:
     voice_id = payload.get("voice_id")
     bg_music_enabled = bool(payload.get("bg_music_enabled", False))
     storage_prefix = str(payload.get("storage_prefix") or f"tenants/{tenant_id}").strip("/")
-    callback_url = payload.get("callback_url")
-    webhook_secret = payload.get("webhook_secret")
+    nextjs_app_url = (os.getenv("NEXTJS_APP_URL") or "").strip()
+    callback_url = payload.get("callback_url") or (
+        f"{nextjs_app_url.rstrip('/')}/api/course-studio/webhook"
+        if nextjs_app_url
+        else None
+    )
+    webhook_secret = (
+        payload.get("webhook_secret")
+        or os.getenv("WEBHOOK_SECRET")
+        or os.getenv("VIDEO_WEBHOOK_SECRET")
+    )
     lessons = payload.get("lessons") or []
 
     print(

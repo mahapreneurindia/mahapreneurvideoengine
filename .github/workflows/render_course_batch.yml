@@ -43,9 +43,12 @@ jobs:
         env:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
           VIDEO_WEBHOOK_SECRET: ${{ secrets.VIDEO_WEBHOOK_SECRET }}
+          NEXTJS_APP_URL: ${{ secrets.NEXTJS_APP_URL }}
           COURSE_PAYLOAD_JSON: ${{ inputs.payload_json }}
           COURSE_PAYLOAD_URL: ${{ inputs.payload_url }}
         run: python3 course_engine/render_course.py
