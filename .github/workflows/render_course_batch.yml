@@ -1,0 +1,51 @@
+name: Render Course Batch
+on:
+  workflow_dispatch:
+    inputs:
+      tenant_id:
+        description: "Tenant ID"
+        required: true
+        type: string
+      course_project_id:
+        description: "Course Project ID"
+        required: true
+        type: string
+      payload_json:
+        description: "Inline course batch JSON payload (optional)"
+        required: false
+        type: string
+      payload_url:
+        description: "URL to fetch course batch JSON payload (optional)"
+        required: false
+        type: string
+
+jobs:
+  render-course-batch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install System Dependencies & Fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-devanagari fonts-inter
+
+      - name: Install Python Packages
+        run: pip install skia-python uharfbuzz edge-tts requests numpy Pillow
+
+      - name: Render Course Batch
+        env:
+          SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          SUPABASE_STORAGE_BUCKET: ${{ secrets.SUPABASE_STORAGE_BUCKET }}
+          VIDEO_WEBHOOK_SECRET: ${{ secrets.VIDEO_WEBHOOK_SECRET }}
+          COURSE_PAYLOAD_JSON: ${{ inputs.payload_json }}
+          COURSE_PAYLOAD_URL: ${{ inputs.payload_url }}
+        run: python3 course_engine/render_course.py
