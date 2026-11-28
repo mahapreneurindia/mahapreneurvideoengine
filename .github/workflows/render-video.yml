@@ -2,6 +2,20 @@ name: Render Cinematic Video
 on:
   repository_dispatch:
     types: [generate_video]
+  workflow_dispatch:
+    inputs:
+      render_mode:
+        description: "Render mode (e.g. ugc_ad or default)"
+        required: false
+        type: string
+      job_id:
+        description: "Job ID"
+        required: false
+        type: string
+      payload_json:
+        description: "Optional JSON payload"
+        required: false
+        type: string
 
 jobs:
   build-and-upload:
@@ -18,7 +32,7 @@ jobs:
       - name: Install System Dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y ffmpeg
+          sudo apt-get install -y ffmpeg fonts-noto-core fonts-noto-devanagari fonts-inter
 
       - name: Install Python Requirements
         run: pip install -r requirements.txt
@@ -29,42 +43,60 @@ jobs:
       - name: Process Sarvam AI & Render Video
         env:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
+          HEYGEN_API_KEY: ${{ secrets.HEYGEN_API_KEY }}
+          INPUT_RENDER_MODE: ${{ inputs.render_mode }}
+          INPUT_PAYLOAD_JSON: ${{ inputs.payload_json }}
         run: |
           echo "Executing TTS and Skia rendering pipeline..."
           mkdir -p /tmp/video-job
 
-          # Save the incoming Next.js payload (script, theme, job_id) to a JSON file
-          cat << 'EOF' > /tmp/video-job/payload.json
+          if [ -n "$INPUT_PAYLOAD_JSON" ]; then
+            printf '%s' "$INPUT_PAYLOAD_JSON" > /tmp/video-job/payload.json
+          else
+            cat << 'EOF' > /tmp/video-job/payload.json
           ${{ toJSON(github.event.client_payload) }}
           EOF
+          fi
 
-          # Execute the custom autonomous rendering script
-          python3 scripts/render.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
+          RENDER_MODE=$(python3 -c "import json, os; p=json.load(open('/tmp/video-job/payload.json')); d=p.get('client_payload', p); print((os.environ.get('INPUT_RENDER_MODE') or d.get('render_mode') or '').strip())")
+          echo "Detected render_mode: $RENDER_MODE"
+
+          if [ "$RENDER_MODE" = "ugc_ad" ]; then
+            python3 ugc_engine/render_ugc.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4 --manifest /tmp/video-job/ugc_manifest.json
+          else
+            python3 scripts/render.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
+          fi
 
       - name: Upload to Supabase Storage
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
-          JOB_ID: ${{ github.event.client_payload.job_id }}
-        run: python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 $JOB_ID
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+        run: |
+          if [ -f /tmp/video-job/ugc_manifest.json ]; then
+            python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 "$JOB_ID" --manifest /tmp/video-job/ugc_manifest.json --result-out /tmp/video-job/upload_result.json
+          else
+            python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 "$JOB_ID"
+          fi
 
       - name: Send Webhook to Next.js
         if: always()
         env:
           NEXTJS_APP_URL: ${{ secrets.NEXTJS_APP_URL }}
           WEBHOOK_SECRET: ${{ secrets.WEBHOOK_SECRET }}
-          JOB_ID: ${{ github.event.client_payload.job_id }}
-          SUPABASE_URL: "https://your-supabase-url.supabase.co/storage/v1/object/public/media/${{ github.event.client_payload.job_id }}.mp4"
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
+          SUPABASE_BASE_URL: ${{ secrets.SUPABASE_URL }}
           JOB_STATUS: ${{ job.status }}
         run: |
-          # Map GitHub status to our DB status
           if [ "$JOB_STATUS" == "success" ]; then
-            FINAL_STATUS="completed"
+            export FINAL_STATUS="completed"
           else
-            FINAL_STATUS="failed"
+            export FINAL_STATUS="failed"
           fi
+
+          WEBHOOK_BODY=$(python3 -c "import json, os; job_id=os.environ.get('JOB_ID',''); base=os.environ.get('SUPABASE_BASE_URL','').rstrip('/'); status=os.environ.get('FINAL_STATUS','failed'); body={'job_id': job_id, 'status': status, 'supabase_url': f'{base}/storage/v1/object/public/media/{job_id}/final.mp4' if base else ''}; res_path='/tmp/video-job/upload_result.json'; res=json.load(open(res_path)) if os.path.isfile(res_path) else {}; body.update({'video_url': res['video_url'], 'supabase_url': res['video_url'], 'variations': res.get('variations', [])}) if res.get('video_url') else None; print(json.dumps(body))")
 
           curl -X POST "$NEXTJS_APP_URL/api/video/webhook" \
             -H "Content-Type: application/json" \
             -H "Authorization: Bearer $WEBHOOK_SECRET" \
-            -d "{\"job_id\": \"$JOB_ID\", \"status\": \"$FINAL_STATUS\", \"supabase_url\": \"$SUPABASE_URL\"}"
+            -d "$WEBHOOK_BODY"
