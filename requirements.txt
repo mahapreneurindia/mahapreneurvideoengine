@@ -6,3 +6,4 @@ requests>=2.28.0
 sarvamai>=0.1.0
 edge-tts
 uharfbuzz
+python-pptx

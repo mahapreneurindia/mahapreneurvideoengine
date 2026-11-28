@@ -44,11 +44,19 @@ jobs:
         env:
           SARVAM_API_KEY: ${{ secrets.SARVAM_API_KEY }}
           HEYGEN_API_KEY: ${{ secrets.HEYGEN_API_KEY }}
+          GAMMA_API_KEY: ${{ secrets.GAMMA_API_KEY }}
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
+          JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
           INPUT_RENDER_MODE: ${{ inputs.render_mode }}
           INPUT_PAYLOAD_JSON: ${{ inputs.payload_json }}
         run: |
           echo "Executing TTS and Skia rendering pipeline..."
           mkdir -p /tmp/video-job
+
+          if [ -n "$GAMMA_API_KEY" ]; then
+            echo "::add-mask::$GAMMA_API_KEY"
+          fi
 
           if [ -n "$INPUT_PAYLOAD_JSON" ]; then
             printf '%s' "$INPUT_PAYLOAD_JSON" > /tmp/video-job/payload.json
@@ -58,11 +66,18 @@ jobs:
           EOF
           fi
 
+          PAYLOAD_GAMMA_KEY=$(python3 -c "import json; p=json.load(open('/tmp/video-job/payload.json')); d=p.get('client_payload', p); print(d.get('gamma_api_key') or '')")
+          if [ -n "$PAYLOAD_GAMMA_KEY" ]; then
+            echo "::add-mask::$PAYLOAD_GAMMA_KEY"
+          fi
+
           RENDER_MODE=$(python3 -c "import json, os; p=json.load(open('/tmp/video-job/payload.json')); d=p.get('client_payload', p); print((os.environ.get('INPUT_RENDER_MODE') or d.get('render_mode') or '').strip())")
           echo "Detected render_mode: $RENDER_MODE"
 
           if [ "$RENDER_MODE" = "ugc_ad" ]; then
             python3 ugc_engine/render_ugc.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4 --manifest /tmp/video-job/ugc_manifest.json
+          elif [ "$RENDER_MODE" = "gamma_course" ] || [ "$RENDER_MODE" = "gamma_carousel" ]; then
+            python3 gamma_engine/render_gamma_course.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4 --result-out /tmp/video-job/upload_result.json
           else
             python3 scripts/render.py --payload /tmp/video-job/payload.json --output /tmp/video-job/final.mp4
           fi
@@ -73,7 +88,9 @@ jobs:
           SUPABASE_SERVICE_KEY: ${{ secrets.SUPABASE_SERVICE_KEY }}
           JOB_ID: ${{ github.event.client_payload.job_id || inputs.job_id }}
         run: |
-          if [ -f /tmp/video-job/ugc_manifest.json ]; then
+          if [ -f /tmp/video-job/upload_result.json ]; then
+            echo "Artifacts already uploaded by engine; skipping duplicate upload."
+          elif [ -f /tmp/video-job/ugc_manifest.json ]; then
             python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 "$JOB_ID" --manifest /tmp/video-job/ugc_manifest.json --result-out /tmp/video-job/upload_result.json
           else
             python3 scripts/upload_to_supabase.py /tmp/video-job/final.mp4 "$JOB_ID"
@@ -94,7 +111,7 @@ jobs:
             export FINAL_STATUS="failed"
           fi
 
-          WEBHOOK_BODY=$(python3 -c "import json, os; job_id=os.environ.get('JOB_ID',''); base=os.environ.get('SUPABASE_BASE_URL','').rstrip('/'); status=os.environ.get('FINAL_STATUS','failed'); body={'job_id': job_id, 'status': status, 'supabase_url': f'{base}/storage/v1/object/public/media/{job_id}/final.mp4' if base else ''}; res_path='/tmp/video-job/upload_result.json'; res=json.load(open(res_path)) if os.path.isfile(res_path) else {}; body.update({'video_url': res['video_url'], 'supabase_url': res['video_url'], 'variations': res.get('variations', [])}) if res.get('video_url') else None; print(json.dumps(body))")
+          WEBHOOK_BODY=$(python3 -c "import json, os; job_id=os.environ.get('JOB_ID',''); base=os.environ.get('SUPABASE_BASE_URL','').rstrip('/'); status=os.environ.get('FINAL_STATUS','failed'); body={'job_id': job_id, 'status': status, 'supabase_url': f'{base}/storage/v1/object/public/media/{job_id}/final.mp4' if base else ''}; res_path='/tmp/video-job/upload_result.json'; res=json.load(open(res_path)) if os.path.isfile(res_path) else {}; [body.__setitem__(k, res[k]) for k in ('video_url','study_pdf_url','pptx_url','carousel_urls','gamma_id','gamma_url','gamma_credits_used','variations') if k in res and res[k] is not None]; (body.__setitem__('supabase_url', res['video_url']) if res.get('video_url') else None); print(json.dumps(body))")
 
           curl -X POST "$NEXTJS_APP_URL/api/video/webhook" \
             -H "Content-Type: application/json" \
