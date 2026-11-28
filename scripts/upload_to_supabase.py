@@ -42,8 +42,9 @@ def main():
     file_path = sys.argv[1]
     job_id = sys.argv[2]
 
-    supabase_url = os.environ.get("SUPABASE_URL")
+    supabase_url = (os.environ.get("SUPABASE_URL") or "").rstrip("/")
     supabase_key = os.environ.get("SUPABASE_SERVICE_KEY")
+    bucket = (os.environ.get("SUPABASE_STORAGE_BUCKET") or "media").strip() or "media"
 
     if not supabase_url or not supabase_key:
         print("Error: SUPABASE_URL or SUPABASE_SERVICE_KEY environment variables missing.")
@@ -64,18 +65,26 @@ def main():
         upload_path = temp_compressed
 
     file_name = os.path.basename(file_path)
-    # Construct the Supabase Storage endpoint for the 'media' bucket
-    endpoint = f"{supabase_url}/storage/v1/object/media/{job_id}/{file_name}"
+    # Construct the Supabase Storage endpoint for the configured bucket (default 'media')
+    endpoint = f"{supabase_url}/storage/v1/object/{bucket}/{job_id}/{file_name}"
 
     headers = {
         "Authorization": f"Bearer {supabase_key}",
+        "apikey": supabase_key,
         "Content-Type": "video/mp4",
+        "x-upsert": "true",
     }
 
     try:
         print(f"Uploading {upload_path} to {endpoint}...")
         with open(upload_path, "rb") as f:
             response = requests.post(endpoint, headers=headers, data=f)
+        if response.status_code in (400, 409) and (
+            "KeyAlreadyExists" in response.text or "Duplicate" in response.text
+        ):
+            print(f"Object already exists ({response.status_code}); retrying with PUT...")
+            with open(upload_path, "rb") as f:
+                response = requests.put(endpoint, headers=headers, data=f)
     finally:
         if temp_compressed and os.path.exists(temp_compressed):
             try:
@@ -85,7 +94,7 @@ def main():
 
     if response.status_code in (200, 201):
         print("Upload successful!")
-        print(f"{supabase_url}/storage/v1/object/public/media/{job_id}/{file_name}")
+        print(f"{supabase_url}/storage/v1/object/public/{bucket}/{job_id}/{file_name}")
     else:
         print(f"Upload failed! Status code: {response.status_code}")
         print(f"Response: {response.text}")

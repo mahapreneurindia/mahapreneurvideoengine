@@ -151,12 +151,19 @@ def _upload_to_supabase(local_mp4: str, object_path: str) -> str:
     endpoint = f"{supabase_url}/storage/v1/object/{bucket}/{object_path}"
     headers = {
         "Authorization": f"Bearer {service_key}",
+        "apikey": service_key,
         "Content-Type": "video/mp4",
         "x-upsert": "true",
     }
     print(f"Uploading {local_mp4} -> {endpoint}")
     with open(local_mp4, "rb") as f:
         resp = requests.post(endpoint, headers=headers, data=f, timeout=120)
+    if resp.status_code in (400, 409) and (
+        "KeyAlreadyExists" in resp.text or "Duplicate" in resp.text
+    ):
+        print(f"Object already exists ({resp.status_code}); retrying with PUT...")
+        with open(local_mp4, "rb") as f:
+            resp = requests.put(endpoint, headers=headers, data=f, timeout=120)
     if resp.status_code not in (200, 201):
         raise RuntimeError(f"Supabase upload failed ({resp.status_code}): {resp.text}")
 
