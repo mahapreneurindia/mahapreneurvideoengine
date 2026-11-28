@@ -21,6 +21,11 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 if SCRIPT_DIR not in sys.path:
     sys.path.insert(0, SCRIPT_DIR)
 
+from data_cards import (
+    draw_data_explainer_hud,
+    draw_data_explainer_overlay,
+    extract_data_cards,
+)
 from make_graphics import draw_vector_graphic
 from make_map import draw_map_card
 from make_sfx import ensure_sfx_assets
@@ -1118,14 +1123,29 @@ def draw_chapter_card(
             )
         elif skia_img is not None:
             img_w, img_h = skia_img.width(), skia_img.height()
-            photo_h = h * 0.46
-            scale = min(inner_w / img_w, photo_h / img_h) * (1.0 + (0.04 * local_progress if is_active else 0.0))
-            drawn_w, drawn_h = img_w * scale, img_h * scale
-            canvas.save()
-            canvas.translate(-drawn_w / 2.0, visual_top + 20.0 + (photo_h - drawn_h) / 2.0)
-            canvas.scale(scale, scale)
-            canvas.drawImage(skia_img, 0, 0, skia.SamplingOptions(skia.FilterMode.kLinear))
-            canvas.restore()
+            if card.get("data_cards"):
+                photo_h = h * 0.25
+                scale = min(inner_w / img_w, photo_h / img_h) * (1.0 + (0.04 * local_progress if is_active else 0.0))
+                drawn_w, drawn_h = img_w * scale, img_h * scale
+                canvas.save()
+                canvas.translate(-drawn_w / 2.0, visual_top + (photo_h - drawn_h) / 2.0)
+                canvas.scale(scale, scale)
+                canvas.drawImage(skia_img, 0, 0, skia.SamplingOptions(skia.FilterMode.kLinear))
+                canvas.restore()
+                dc_rect = skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + photo_h + 20.0, inner_w, h * 0.31)
+                draw_data_explainer_overlay(canvas, dc_rect, card["data_cards"], vg_progress, font_path)
+            else:
+                photo_h = h * 0.46
+                scale = min(inner_w / img_w, photo_h / img_h) * (1.0 + (0.04 * local_progress if is_active else 0.0))
+                drawn_w, drawn_h = img_w * scale, img_h * scale
+                canvas.save()
+                canvas.translate(-drawn_w / 2.0, visual_top + 20.0 + (photo_h - drawn_h) / 2.0)
+                canvas.scale(scale, scale)
+                canvas.drawImage(skia_img, 0, 0, skia.SamplingOptions(skia.FilterMode.kLinear))
+                canvas.restore()
+        elif card.get("data_cards"):
+            dc_rect = skia.Rect.MakeXYWH(-inner_w / 2.0, visual_top + 20.0, inner_w, h * 0.48)
+            draw_data_explainer_overlay(canvas, dc_rect, card["data_cards"], vg_progress, font_path)
     elif has_vg and has_map and loc_text:
         # Co-render explicit vector graphic (left) and map card (right) without overlap
         vg_w = w * 0.54
@@ -1172,6 +1192,15 @@ def draw_chapter_card(
             vg_x = (half_w - 48.0 - vg_w) if skia_img is not None else (-vg_w / 2.0)
             vg_rect = skia.Rect.MakeXYWH(vg_x, -half_h + 104.0, vg_w, vg_h)
             draw_vector_graphic(canvas, vg_rect, vg_spec, vg_progress, font_path)
+        elif card.get("data_cards") and not has_map and not has_vg:
+            dc_w = (w * 0.44) if skia_img is not None else (w * 0.84)
+            dc_h = h * 0.54
+            dc_x = (half_w - 48.0 - dc_w) if skia_img is not None else (-dc_w / 2.0)
+            dc_rect = skia.Rect.MakeXYWH(dc_x, -half_h + 104.0, dc_w, dc_h)
+            draw_data_explainer_overlay(canvas, dc_rect, card["data_cards"], vg_progress, font_path)
+
+    if card.get("data_cards") and (has_map or has_vg) and not loc_text:
+        draw_data_explainer_hud(canvas, w, h, card["data_cards"], font_path)
 
     # Bottom gradient scrim
     scrim_paint = skia.Paint(
@@ -1664,11 +1693,18 @@ def main() -> None:
         or "16:9"
     )
     aspect_ratio, canvas_w, canvas_h = resolve_canvas_dimensions(raw_ar)
+    data_cards = extract_data_cards(payload, data, script_data)
+    style_name = str(
+        script_data.get("style") or data.get("style") or payload.get("style") or ""
+    ).strip().lower()
+    is_data_explainer = (style_name == "data_explainer") or bool(data_cards)
+    if is_data_explainer and not data_cards:
+        data_cards = {"source_badge": str(video_title or "Verified Explainer")}
     default_series = script_data.get("series_title") or data.get("series_title")
     default_part = script_data.get("part_number") or data.get("part_number")
     print(f"Normalized data keys: {list(data.keys())}")
     print(
-        f"Using theme: {theme_name} | Aspect ratio: {aspect_ratio} ({canvas_w}x{canvas_h}) "
+        f"Using theme: {theme_name} | Style: {style_name or 'default'} | Aspect ratio: {aspect_ratio} ({canvas_w}x{canvas_h}) "
         f"| Total parsed chapters: {len(chapters)}"
     )
 
@@ -1734,6 +1770,7 @@ def main() -> None:
                 "map_location": map_location,
                 "highlight_stat": highlight_stat,
                 "vector_graphic": chapter.get("vector_graphic"),
+                "data_cards": data_cards if is_data_explainer else None,
                 "part_number": chapter.get("part_number") if chapter.get("part_number") is not None else default_part,
                 "series_title": chapter.get("series_title") or default_series,
                 "skia_img": skia_img,
